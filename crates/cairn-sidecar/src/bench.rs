@@ -266,8 +266,13 @@ pub fn run_cluster(
         reinstate_every: 1,
         ..NetPolicy::default()
     };
-    let mut signer = ClusterSigner::new(cluster.group.clone(), cluster.peers.clone(), policy)
-        .map_err(|e| e.to_string())?;
+    let mut signer = ClusterSigner::new(
+        cluster.group.clone(),
+        cluster.peers.clone(),
+        policy,
+        cluster.coordinator_tls().map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     let key_id = crate::certificate::key_id(&cluster.group.pk);
 
     let (mut latency, mut rejections, mut signer_bytes, mut engine_bytes) =

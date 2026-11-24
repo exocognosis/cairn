@@ -3,7 +3,7 @@
 
 use crate::kms::KmsSigner;
 use cairn_net::cluster::{node_ids, peers_to_json, share_file, write_keys};
-use cairn_net::{Coordinator, FaultMode, NetPolicy, NetReport, NodeId, Peers};
+use cairn_net::{Coordinator, FaultMode, NetPolicy, NetReport, NodeId, Peers, TlsIdentity};
 use serde_json::{json, Value};
 use sha3::{Digest, Sha3_256};
 use std::io::Read as _;
@@ -24,14 +24,19 @@ pub struct ClusterSigner {
 }
 
 impl ClusterSigner {
-    pub fn new(group: Arc<GroupPublic>, peers: Peers, policy: NetPolicy) -> std::io::Result<Self> {
+    pub fn new(
+        group: Arc<GroupPublic>,
+        peers: Peers,
+        policy: NetPolicy,
+        tls: Arc<TlsIdentity>,
+    ) -> std::io::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()?;
         Ok(Self {
             runtime,
-            coordinator: Coordinator::new(group, peers, policy),
+            coordinator: Coordinator::new(group, peers, policy, tls),
             last_report: None,
         })
     }
@@ -103,6 +108,8 @@ pub struct ProcessCluster {
     pub peers: Peers,
     pub peers_file: PathBuf,
     pub group_file: PathBuf,
+    /// Directory with the cluster CA, fingerprints and every node's certificate and key.
+    pub tls_dir: PathBuf,
     socket_dir: PathBuf,
     children: Vec<Child>,
 }
@@ -151,6 +158,7 @@ impl ProcessCluster {
             peers: peers.clone(),
             peers_file,
             group_file,
+            tls_dir: keys.join("tls"),
             socket_dir,
             children: Vec::new(),
         };
@@ -184,6 +192,8 @@ impl ProcessCluster {
                 .arg(&cluster.peers_file)
                 .arg("--group")
                 .arg(&cluster.group_file)
+                .arg("--tls")
+                .arg(&cluster.tls_dir)
                 .args(["--fault", fault_name(fault)])
                 .args(["--link-delay-ms", &opts.link_delay_ms.to_string()])
                 .args(["--round-timeout-ms", &opts.round_timeout_ms.to_string()]);
@@ -213,6 +223,11 @@ impl ProcessCluster {
             std::thread::sleep(Duration::from_millis(20));
         }
         Ok(cluster)
+    }
+
+    /// The coordinator's TLS identity for this cluster.
+    pub fn coordinator_tls(&self) -> std::io::Result<Arc<TlsIdentity>> {
+        TlsIdentity::load(&self.tls_dir, NodeId::Coordinator).map(Arc::new)
     }
 
     /// Number of OS processes in the cluster (signers, root engines and the MPC worker).

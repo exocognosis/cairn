@@ -11,9 +11,9 @@ Run one cairn cluster across two machines:
 machine, where they are tested. The split layout below has not been run on two hosts. Read the
 three warnings first.
 
-1. **Tunnel required.** cairn's transport is plain TCP and carries sub-shares of the key. Every
-   address below must be inside an encrypted, authenticated tunnel (WireGuard or Tailscale).
-   Never bind a node to a public interface.
+1. **Links are TLS, keep them private anyway.** Node links are mutually authenticated TLS 1.3,
+   so sub-shares are encrypted in transit. Still bind nodes to private or tunnel addresses
+   (WireGuard, Tailscale) and firewall the ports: the endpoints are unreviewed research code.
 2. **The MPC backend decides what this deployment is.** With `cairn mpc-worker` (the reference
    worker) the Linux host sees the key during signing: a test deployment. With the MP-SPDZ
    backend the engines run a real three-party computation, semi-honest only, verified on one
@@ -51,14 +51,15 @@ Replace the generated loopback address book with the real one:
 } > keys/peers.json
 ```
 
-Send the Linux host its files, then remove those shares from the Mac:
+Send the Linux host its files (its shares, its nodes' certificates and keys, the CA and the
+fingerprint table), then remove its secrets from the Mac:
 
 ```bash
-scp keys/group.bin keys/peers.json keys/leaf_2_*.share keys/leaf_3_*.share keys/leaf_4_*.share linux:cairn/keys/
+ssh linux 'mkdir -p cairn/keys/tls' && scp keys/group.bin keys/peers.json keys/leaf_[234]_*.share linux:cairn/keys/ && scp keys/tls/ca.pem keys/tls/fingerprints.json keys/tls/leaf_[234]_* keys/tls/root_* linux:cairn/keys/tls/
 ```
 
 ```bash
-rm -P keys/leaf_2_*.share keys/leaf_3_*.share keys/leaf_4_*.share
+rm -P keys/leaf_[234]_*.share keys/tls/leaf_[234]_*.key keys/tls/root_*.key
 ```
 
 A trusted dealer on one machine is a v2 limitation: the Mac held the whole key during `keygen`.
@@ -77,13 +78,13 @@ directory (see its README) and raise `--mpc-timeout-ms` on the root engines and 
 Root engines:
 
 ```bash
-for k in 1 2 3 4; do nohup target/release/cairn node --role root --id root_$k --bind 10.8.0.2:$((7115 + k)) --peers keys/peers.json --group keys/group.bin --mpc-socket-dir /run/cairn > logs-root_$k.txt 2>&1 & done
+for k in 1 2 3 4; do nohup target/release/cairn node --role root --id root_$k --bind 10.8.0.2:$((7115 + k)) --peers keys/peers.json --group keys/group.bin --tls keys/tls --mpc-socket-dir /run/cairn > logs-root_$k.txt 2>&1 & done
 ```
 
 Signers of leaves 2 to 4:
 
 ```bash
-port=7104; for leaf in 2 3 4; do for s in 1 2 3 4; do nohup target/release/cairn node --role signer --id leaf_$leaf/signer_$s --bind 10.8.0.2:$port --peers keys/peers.json --group keys/group.bin --share keys/leaf_${leaf}_signer_$s.share > logs-leaf_${leaf}_signer_$s.txt 2>&1 & port=$((port + 1)); done; done
+port=7104; for leaf in 2 3 4; do for s in 1 2 3 4; do nohup target/release/cairn node --role signer --id leaf_$leaf/signer_$s --bind 10.8.0.2:$port --peers keys/peers.json --group keys/group.bin --tls keys/tls --share keys/leaf_${leaf}_signer_$s.share > logs-leaf_${leaf}_signer_$s.txt 2>&1 & port=$((port + 1)); done; done
 ```
 
 CometBFT runs as usual on this host with its RPC reachable from the Mac over the tunnel
@@ -94,13 +95,13 @@ CometBFT runs as usual on this host with its RPC reachable from the Mac over the
 Signers of leaf 1:
 
 ```bash
-for s in 1 2 3 4; do nohup target/release/cairn node --role signer --id leaf_1/signer_$s --bind 10.8.0.1:$((7099 + s)) --peers keys/peers.json --group keys/group.bin --share keys/leaf_1_signer_$s.share > logs-leaf_1_signer_$s.txt 2>&1 & done
+for s in 1 2 3 4; do nohup target/release/cairn node --role signer --id leaf_1/signer_$s --bind 10.8.0.1:$((7099 + s)) --peers keys/peers.json --group keys/group.bin --tls keys/tls --share keys/leaf_1_signer_$s.share > logs-leaf_1_signer_$s.txt 2>&1 & done
 ```
 
 Coordinator and KMS-compatible endpoint (loopback: only the local sidecar talks to it):
 
 ```bash
-nohup target/release/cairn serve-kms --listen 127.0.0.1:8200 --peers keys/peers.json --group keys/group.bin --public-key-out public_key.hex --round-timeout-ms 3000 > logs-serve-kms.txt 2>&1 &
+nohup target/release/cairn serve-kms --listen 127.0.0.1:8200 --peers keys/peers.json --group keys/group.bin --tls keys/tls --public-key-out public_key.hex --round-timeout-ms 3000 > logs-serve-kms.txt 2>&1 &
 ```
 
 pqc-sidecar, unmodified, with this `config.toml`:
@@ -148,7 +149,7 @@ v2; faults surface as pqc-sidecar signing errors (`KMSInternalException` with th
 
 | Flag | Where | Default | Set it to |
 |---|---|---|---|
-| `--round-timeout-ms` | nodes, `serve-kms` | 2000 | several times the tunnel round trip |
+| `--round-timeout-ms` | nodes, `serve-kms` | 2000 | several times the link round trip (each exchange is a TCP and a TLS handshake plus the request) |
 | `--mpc-timeout-ms` | root engines, `serve-kms` | 30000 | longer than one MPC phase of your backend |
 
 A signer's deal includes three nested exchanges with the engines; the coordinator allows it two

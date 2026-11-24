@@ -1,7 +1,7 @@
 //! `cairn`: demo, benchmark and KMS-compatible endpoint for the committee tower.
 
 use cairn_net::cluster as net;
-use cairn_net::{FaultMode, Link, NetPolicy, NodeId, Peers, RootNode, SignerNode};
+use cairn_net::{FaultMode, Link, NetPolicy, NodeId, Peers, RootNode, SignerNode, TlsIdentity};
 use cairn_sidecar::cluster::{ClusterSigner, MockChain};
 use cairn_sidecar::{
     bench, kms, write_certificate, write_public_key, CertifierConfig, Checkpoint, TowerCertifier,
@@ -24,17 +24,17 @@ Single process (simulation harness):
 
 Multi-process cluster:
   cairn keygen --out <dir> [--seed-hex <64 hex>] [--host <ip>] [--base-port <port>]
-      Trusted-dealer setup: writes group.bin, one .share file per signer, peers.json and
-      public_key.hex.
+      Trusted-dealer setup: writes group.bin, one .share file per signer, peers.json,
+      public_key.hex and tls/ (cluster CA, one certificate and key per node).
   cairn node --role signer|root --id <leaf_i/signer_j|root_k> --bind <addr:port>
-             --peers <peers.json|id=addr,...> --group <group.bin>
+             --peers <peers.json|id=addr,...> --group <group.bin> --tls <dir>
              [--share <file>]            (signer)
              [--mpc-socket-dir <dir>]    (root: MPC backend party sockets)
              [--round-timeout-ms <n>] [--mpc-timeout-ms <n>] [--link-delay-ms <n>] [--fault <mode>]
   cairn mpc-worker --socket-dir <dir>
       Reference three-party MPC backend (clear text, NOT a secure computation).
   cairn serve-kms [--listen <addr:port>] [--public-key-out <file>]
-                  [--peers <peers.json> --group <group.bin>]   (sign through a TCP cluster)
+                  [--peers <peers.json> --group <group.bin> --tls <dir>]   (sign through a cluster)
                   [--round-timeout-ms <n>] [--mpc-timeout-ms <n>] [--link-delay-ms <n>]
       KMS-compatible endpoint for pqc-sidecar's aws_kms backend. Without --peers the tower runs
       inside this process.
@@ -65,6 +65,15 @@ fn peers(args: &[String]) -> Result<Option<Peers>, String> {
     };
     let text = std::fs::read_to_string(&value).unwrap_or(value);
     net::parse_peers(&text).map(Some)
+}
+
+/// `--tls <dir>`: this node's certificate and key, the cluster CA and the fingerprint table.
+fn tls(args: &[String], id: NodeId) -> Result<Arc<TlsIdentity>, String> {
+    let dir =
+        arg(args, "--tls").ok_or("needs --tls <dir> (written by `cairn keygen` as <out>/tls)")?;
+    TlsIdentity::load(&PathBuf::from(dir), id)
+        .map(Arc::new)
+        .map_err(|e| format!("TLS identity of {id}: {e}"))
 }
 
 fn seed(args: &[String]) -> Result<[u8; 32], String> {
@@ -172,7 +181,8 @@ fn run(args: &[String]) -> Result<(), String> {
                         peers.len()
                     );
                     let signer =
-                        ClusterSigner::new(group, peers, policy).map_err(|e| e.to_string())?;
+                        ClusterSigner::new(group, peers, policy, tls(args, NodeId::Coordinator)?)
+                            .map_err(|e| e.to_string())?;
                     kms::serve(&listen, signer)
                 }
                 None => {
@@ -232,6 +242,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let link = Link {
                 timeout: Duration::from_millis(ms(args, "--round-timeout-ms", 2000)?),
                 delay,
+                tls: tls(args, id)?,
             };
             let fault: FaultMode =
                 arg(args, "--fault").map_or(Ok(FaultMode::None), |f| f.parse())?;
@@ -275,6 +286,7 @@ fn run(args: &[String]) -> Result<(), String> {
                             listener,
                             RootNode::new(id, group, fault, dir.into(), mpc),
                             delay,
+                            link.tls.clone(),
                         )
                         .await;
                     }

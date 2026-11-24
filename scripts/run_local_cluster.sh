@@ -43,7 +43,7 @@ port=$BASE
 for leaf in 1 2 3 4; do for signer in 1 2 3 4; do
   id="leaf_${leaf}/signer_${signer}"; f="$(fault_of "$id")"
   "$CAIRN" node --role signer --id "$id" --bind "127.0.0.1:$port" \
-    --peers "$DIR/keys/peers.json" --group "$DIR/keys/group.bin" \
+    --peers "$DIR/keys/peers.json" --group "$DIR/keys/group.bin" --tls "$DIR/keys/tls" \
     --share "$DIR/keys/leaf_${leaf}_signer_${signer}.share" \
     --link-delay-ms "$DELAY" --fault "${f:-none}" 2> "$DIR/logs/leaf_${leaf}_signer_${signer}.log" & PIDS+=($!)
   port=$((port + 1))
@@ -51,11 +51,11 @@ done; done
 for root in 1 2 3 4; do
   id="root_${root}"; f="$(fault_of "$id")"
   "$CAIRN" node --role root --id "$id" --bind "127.0.0.1:$port" \
-    --peers "$DIR/keys/peers.json" --group "$DIR/keys/group.bin" --mpc-socket-dir "$SOCK" --mpc-timeout-ms "$MPC_MS" \
+    --peers "$DIR/keys/peers.json" --group "$DIR/keys/group.bin" --tls "$DIR/keys/tls" --mpc-socket-dir "$SOCK" --mpc-timeout-ms "$MPC_MS" \
     --link-delay-ms "$DELAY" --fault "${f:-none}" 2> "$DIR/logs/root_${root}.log" & PIDS+=($!)
   port=$((port + 1))
 done
-"$CAIRN" serve-kms --listen "127.0.0.1:$KMS" --peers "$DIR/keys/peers.json" --group "$DIR/keys/group.bin" \
+"$CAIRN" serve-kms --listen "127.0.0.1:$KMS" --peers "$DIR/keys/peers.json" --group "$DIR/keys/group.bin" --tls "$DIR/keys/tls" \
   --public-key-out "$DIR/public_key.hex" --mpc-timeout-ms "$MPC_MS" --link-delay-ms "$DELAY" 2> "$DIR/logs/serve-kms.log" & PIDS+=($!)
 
 for _ in $(seq 100); do nc -z 127.0.0.1 "$KMS" 2>/dev/null && break; sleep 0.1; done

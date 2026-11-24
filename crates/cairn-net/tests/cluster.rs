@@ -32,7 +32,12 @@ async fn cluster(seed: u8, faults: &[(NodeId, FaultMode)]) -> (LocalCluster, Coo
         reinstate_every: 0,
         ..NetPolicy::default()
     };
-    let coordinator = Coordinator::new(cluster.group.clone(), cluster.peers.clone(), policy);
+    let coordinator = Coordinator::new(
+        cluster.group.clone(),
+        cluster.peers.clone(),
+        policy,
+        cluster.identity(NodeId::Coordinator),
+    );
     (cluster, coordinator)
 }
 
@@ -192,7 +197,12 @@ async fn injected_latency_is_paid_on_the_wall_clock() {
         link_delay: Duration::from_millis(10),
         ..NetPolicy::default()
     };
-    let mut coordinator = Coordinator::new(cluster.group.clone(), cluster.peers.clone(), policy);
+    let mut coordinator = Coordinator::new(
+        cluster.group.clone(),
+        cluster.peers.clone(),
+        policy,
+        cluster.identity(NodeId::Coordinator),
+    );
     let msg = message("wan");
     let start = Instant::now();
     let (signature, report) = coordinator.sign(&msg).await.unwrap();
@@ -203,5 +213,76 @@ async fn injected_latency_is_paid_on_the_wall_clock() {
         start.elapsed() >= floor,
         "{:?} < {floor:?}",
         start.elapsed()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn links_are_mutually_authenticated() {
+    use cairn_net::transport::call;
+    use cairn_net::{Body, CallError, ClusterTls, Frame, Link};
+    let (cluster, _) = cluster(58, &[]).await;
+    let target = signer(1, 1);
+    let addr = cluster.peers[&target].clone();
+    let prepare = |from: NodeId, to: NodeId| Frame {
+        version: 2,
+        from,
+        to,
+        session: [7; 32],
+        body: Body::Prepare {
+            message: message("tls"),
+        },
+    };
+    let link = |tls| Link {
+        timeout: TIMEOUT,
+        delay: Duration::ZERO,
+        tls,
+    };
+
+    // The coordinator's certificate is accepted.
+    let ok = call(
+        &addr,
+        &link(cluster.identity(NodeId::Coordinator)),
+        &prepare(NodeId::Coordinator, target),
+    )
+    .await;
+    assert!(matches!(ok.map(|x| x.reply.body), Ok(Body::Ready { .. })));
+
+    // A real node's certificate, but a frame claiming to come from the coordinator: no answer.
+    let forged = call(
+        &addr,
+        &link(cluster.identity(signer(2, 2))),
+        &prepare(NodeId::Coordinator, target),
+    )
+    .await;
+    assert!(
+        matches!(forged, Err(CallError::Protocol(_))),
+        "forged sender must get nothing"
+    );
+
+    // A certificate from another CA (same names): the handshake or the first read fails.
+    let other = ClusterTls::generate(&[NodeId::Coordinator, target]).unwrap();
+    let outsider = std::sync::Arc::new(other.identity(NodeId::Coordinator).unwrap());
+    let rejected = call(
+        &addr,
+        &link(outsider),
+        &prepare(NodeId::Coordinator, target),
+    )
+    .await;
+    assert!(
+        matches!(rejected, Err(CallError::Protocol(_))),
+        "an outsider must be rejected"
+    );
+
+    // Addressing leaf_1/signer_1 but reaching another node's port: the server name does not match.
+    let wrong = cluster.peers[&signer(1, 2)].clone();
+    let misrouted = call(
+        &wrong,
+        &link(cluster.identity(NodeId::Coordinator)),
+        &prepare(NodeId::Coordinator, target),
+    )
+    .await;
+    assert!(
+        matches!(misrouted, Err(CallError::Protocol(e)) if e.contains("TLS")),
+        "wrong server must fail the handshake"
     );
 }

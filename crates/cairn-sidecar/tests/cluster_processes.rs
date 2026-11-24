@@ -63,8 +63,13 @@ fn sixteen_signer_processes_sign_over_tcp_with_faulty_peers() {
         round_timeout: Duration::from_millis(500),
         ..NetPolicy::default()
     };
-    let mut signer =
-        ClusterSigner::new(cluster.group.clone(), cluster.peers.clone(), policy).unwrap();
+    let mut signer = ClusterSigner::new(
+        cluster.group.clone(),
+        cluster.peers.clone(),
+        policy,
+        cluster.coordinator_tls().unwrap(),
+    )
+    .unwrap();
 
     let message = [CHECKPOINT_DOMAIN, b" processes"].concat();
     let start = Instant::now();
@@ -161,6 +166,8 @@ fn stock_pqc_sidecar_signs_a_live_checkpoint_through_the_cluster() {
             .arg(&cluster.peers_file)
             .arg("--group")
             .arg(&cluster.group_file)
+            .arg("--tls")
+            .arg(&cluster.tls_dir)
             .stderr(log("serve-kms"))
             .spawn()
             .unwrap(),

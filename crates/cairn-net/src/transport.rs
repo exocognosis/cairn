@@ -1,13 +1,15 @@
-//! Framed request/reply transport over TCP with wall-clock deadlines.
+//! Framed request/reply transport over mutually authenticated TLS with wall-clock deadlines.
 //!
 //! Every exchange is one connection: the caller writes one frame and reads one frame, under a
 //! `tokio::time::timeout`. A peer that is down fails fast (connection refused); a peer that
 //! accepts and never answers costs the full deadline. `delay` injects one-way latency on both
 //! directions (round trip = `2 * delay`) to emulate a WAN link on one machine.
 //!
-//! v2 transport is plain TCP: frames are neither encrypted nor authenticated, and a frame's
-//! `from` field is a claim. Run it on loopback or inside an encrypted tunnel (DEPLOY_SPLIT.md).
+//! Links are TLS 1.3 with client certificates ([`crate::tls`]). The caller only talks to the
+//! node it addressed; the server learns the caller's node id from its certificate and discards
+//! a frame whose `from` says otherwise.
 
+use crate::tls::TlsIdentity;
 use crate::wire::{Frame, MAX_FRAME};
 use std::future::Future;
 use std::pin::Pin;
@@ -16,12 +18,14 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct Link {
     /// Deadline for one request/reply exchange.
     pub timeout: Duration,
     /// Injected one-way latency.
     pub delay: Duration,
+    /// This node's certificate and its view of the cluster's.
+    pub tls: Arc<TlsIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -70,13 +74,20 @@ pub struct Exchange {
 }
 
 /// Send `frame` to `addr` and wait for the reply, all within `link.timeout`.
-pub async fn call(addr: &str, link: Link, frame: &Frame) -> Result<Exchange, CallError> {
+pub async fn call(addr: &str, link: &Link, frame: &Frame) -> Result<Exchange, CallError> {
     let exchange = async {
         tokio::time::sleep(link.delay).await;
-        let mut stream = TcpStream::connect(addr)
+        let tcp = TcpStream::connect(addr)
             .await
             .map_err(|e| CallError::Unreachable(e.to_string()))?;
-        stream.set_nodelay(true).ok();
+        tcp.set_nodelay(true).ok();
+        // Handshake: fails unless the peer holds the certificate of the node we addressed.
+        let mut stream = link
+            .tls
+            .connector()
+            .connect(TlsIdentity::server_name(frame.to), tcp)
+            .await
+            .map_err(|e| CallError::Protocol(format!("TLS: {e}")))?;
         let sent = write_frame(&mut stream, frame)
             .await
             .map_err(|e| CallError::Unreachable(e.to_string()))?;
@@ -106,23 +117,40 @@ pub trait Handler: Send + Sync + 'static {
     fn handle(&self, request: Frame) -> Reply<'_>;
 }
 
-/// Accept connections forever, one request per connection.
-pub async fn serve<H: Handler>(listener: TcpListener, handler: Arc<H>, delay: Duration) {
+/// Accept connections forever, one request per connection. A connection is served only if the
+/// client's certificate belongs to a cluster node and the frame's `from` is that node.
+pub async fn serve<H: Handler>(
+    listener: TcpListener,
+    handler: Arc<H>,
+    delay: Duration,
+    tls: Arc<TlsIdentity>,
+) {
     loop {
-        let Ok((mut stream, _)) = listener.accept().await else {
+        let Ok((tcp, _)) = listener.accept().await else {
             tokio::time::sleep(Duration::from_millis(20)).await;
             continue;
         };
-        let handler = handler.clone();
+        let (handler, tls) = (handler.clone(), tls.clone());
         tokio::spawn(async move {
-            stream.set_nodelay(true).ok();
+            tcp.set_nodelay(true).ok();
+            let Ok(mut stream) = tls.acceptor().accept(tcp).await else {
+                return;
+            };
+            let Some(peer) = tls.peer(stream.get_ref().1.peer_certificates()) else {
+                return;
+            };
             let Ok((request, _)) = read_frame(&mut stream).await else {
                 return;
             };
+            if request.from != peer {
+                // Authenticated as one node, claiming to be another: no answer.
+                return;
+            }
             match handler.handle(request).await {
                 Some(reply) => {
                     tokio::time::sleep(delay).await;
                     let _ = write_frame(&mut stream, &reply).await;
+                    let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
                 }
                 // Stalled peer: hold the connection open and say nothing.
                 None => std::future::pending::<()>().await,

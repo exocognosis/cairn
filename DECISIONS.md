@@ -276,3 +276,26 @@ circuit, bridge and README are under `mpc/mp-spdz/`. Independently of its report
 `mpc-bridge` tests and the live sidecar flow were re-run here against its bridges with
 `replicated-field-party.x` and passed. Its per-phase timings are quoted from its README and were
 not re-measured, apart from the phase times its bridge logged during those runs (consistent).
+
+# v2.1: authenticated links
+
+**D-56. Mutual TLS on every node link (supersedes D-37).** TLS 1.3, `rustls` with the `ring`
+provider, client certificates required. Identity is a certificate from a per-cluster CA; the
+caller pins the server by name, the server pins the client by certificate fingerprint and the
+transport rejects a frame whose `from` differs from the authenticated node. This closes the
+"`from` is a claim" hole and encrypts sub-shares in transit. Plain TCP is removed, not kept as
+an option, so there is no insecure mode to select by accident.
+
+**D-57. The dealer issues the certificates.** `cairn keygen` already creates every share on one
+machine, so having it also create the CA and node keys adds no new trust; the CA key is
+discarded after signing. Node-generated keys with signing requests belong with dealerless key
+generation.
+
+**D-58. Fingerprint table instead of parsing certificates.** The server identifies a client by
+looking its certificate up in `fingerprints.json` rather than parsing the subject name out of
+X.509, which keeps a parser out of the trust path. The cost is that adding a node means
+redistributing the table.
+
+**D-59. Still one connection per exchange.** Each exchange now also pays a TLS handshake. On
+loopback that is CPU only; on a WAN it is an extra round trip that the injected-latency
+benchmark does not model.

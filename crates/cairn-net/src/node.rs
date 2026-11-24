@@ -142,7 +142,7 @@ impl SignerNode {
                 let Some(addr) = self.peers.get(&NodeId::Root(*root)) else {
                     return Err(*root);
                 };
-                match call(addr, self.link, &frame).await {
+                match call(addr, &self.link, &frame).await {
                     Ok(x) if x.reply.body == Body::Ack => Ok(x.sent as u64 + x.received as u64),
                     _ => Err(*root),
                 }

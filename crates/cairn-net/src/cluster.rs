@@ -1,6 +1,7 @@
 //! Address books, key files and an in-process cluster.
 
 use crate::node::{FaultMode, Peers, RootNode, SignerNode};
+use crate::tls::{ClusterTls, TlsIdentity};
 use crate::transport::{serve, Link};
 use crate::wire::NodeId;
 use rand::rngs::OsRng;
@@ -74,11 +75,15 @@ pub fn share_file(dir: &Path, id: NodeId) -> PathBuf {
     dir.join(format!("{}.share", id.to_string().replace('/', "_")))
 }
 
-/// Write `group.bin` and one share file per signer (mode 0600) under `dir`.
+/// Write `group.bin`, one share file per signer (mode 0600), and under `dir/tls` a cluster CA
+/// with one certificate per node and one for the coordinator.
 pub fn write_keys(dir: &Path, group: &GroupPublic, shares: &[KeyShare]) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join("group.bin"), group.to_bytes())?;
+    let mut ids = node_ids(&group.shape);
+    ids.push(NodeId::Coordinator);
+    ClusterTls::generate(&ids)?.write(&dir.join("tls"))?;
     for share in shares {
         let id = NodeId::from_path(&share.path)
             .ok_or_else(|| std::io::Error::other("not a two-tier share"))?;
@@ -104,11 +109,17 @@ pub fn read_share(path: &Path) -> std::io::Result<KeyShare> {
 
 /// Run a signer node on `listener` until the task is dropped.
 pub async fn run_signer(listener: TcpListener, node: SignerNode, delay: Duration) {
-    serve(listener, Arc::new(node), delay).await
+    let tls = node.link.tls.clone();
+    serve(listener, Arc::new(node), delay, tls).await
 }
 
-pub async fn run_root(listener: TcpListener, node: RootNode, delay: Duration) {
-    serve(listener, Arc::new(node), delay).await
+pub async fn run_root(
+    listener: TcpListener,
+    node: RootNode,
+    delay: Duration,
+    tls: Arc<TlsIdentity>,
+) {
+    serve(listener, Arc::new(node), delay, tls).await
 }
 
 /// A whole cluster inside this process: real TCP listeners on loopback, every node a task, and
@@ -117,6 +128,7 @@ pub async fn run_root(listener: TcpListener, node: RootNode, delay: Duration) {
 pub struct LocalCluster {
     pub group: Arc<GroupPublic>,
     pub peers: Peers,
+    tls: ClusterTls,
     tasks: Vec<JoinHandle<()>>,
     _worker: mpc_bridge::Worker,
 }
@@ -158,10 +170,9 @@ impl LocalCluster {
                 .map(|(_, m)| *m)
                 .unwrap_or_default()
         };
-        let link = Link {
-            timeout: round_timeout,
-            delay,
-        };
+        let mut ids = node_ids(&shape);
+        ids.push(NodeId::Coordinator);
+        let tls = ClusterTls::generate(&ids)?;
         let mut shares: BTreeMap<NodeId, KeyShare> = shares
             .into_iter()
             .filter_map(|s| Some((NodeId::from_path(&s.path)?, s)))
@@ -175,7 +186,11 @@ impl LocalCluster {
                         group: group.clone(),
                         share,
                         peers: peers.clone(),
-                        link,
+                        link: Link {
+                            timeout: round_timeout,
+                            delay,
+                            tls: Arc::new(tls.identity(id)?),
+                        },
                         fault: fault(id),
                     };
                     tokio::spawn(run_signer(listener, node, delay))
@@ -188,16 +203,22 @@ impl LocalCluster {
                         socket_dir.clone(),
                         Duration::from_secs(30),
                     );
-                    tokio::spawn(run_root(listener, node, delay))
+                    tokio::spawn(run_root(listener, node, delay, Arc::new(tls.identity(id)?)))
                 }
             });
         }
         Ok(Self {
             group,
             peers,
+            tls,
             tasks,
             _worker: worker,
         })
+    }
+
+    /// TLS identity of any node of this cluster (the coordinator's, or one to impersonate with).
+    pub fn identity(&self, id: NodeId) -> Arc<TlsIdentity> {
+        Arc::new(self.tls.identity(id).expect("cluster certificate"))
     }
 
     /// Take a node off the network (its port stops answering).

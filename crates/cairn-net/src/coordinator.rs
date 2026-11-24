@@ -19,6 +19,7 @@
 //! `attempt`, so the result is still the deterministic FIPS 204 signature.
 
 use crate::node::{ready_binding, Peers};
+use crate::tls::TlsIdentity;
 use crate::transport::{call, CallError, Link};
 use crate::wire::{Body, Frame, NodeId, Outcome, NET_VERSION};
 use futures_util::future::join_all;
@@ -117,6 +118,7 @@ pub enum NetError {
 pub struct Coordinator {
     group: Arc<GroupPublic>,
     peers: Peers,
+    tls: Arc<TlsIdentity>,
     pub policy: NetPolicy,
     excluded: BTreeSet<NodeId>,
     signed: u64,
@@ -146,10 +148,16 @@ fn majority<T: PartialEq + Clone>(values: &[T]) -> Option<(T, Option<usize>)> {
 }
 
 impl Coordinator {
-    pub fn new(group: Arc<GroupPublic>, peers: Peers, policy: NetPolicy) -> Self {
+    pub fn new(
+        group: Arc<GroupPublic>,
+        peers: Peers,
+        policy: NetPolicy,
+        tls: Arc<TlsIdentity>,
+    ) -> Self {
         Self {
             group,
             peers,
+            tls,
             policy,
             excluded: BTreeSet::new(),
             signed: 0,
@@ -190,8 +198,9 @@ impl Coordinator {
         let link = Link {
             timeout,
             delay: self.policy.link_delay,
+            tls: self.tls.clone(),
         };
-        match call(addr, link, &frame).await {
+        match call(addr, &link, &frame).await {
             Ok(x) => {
                 let mut r = report.lock().expect("report");
                 *r.coordinator_bytes.entry(to).or_default() += (x.sent + x.received) as u64;
