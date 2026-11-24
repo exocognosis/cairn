@@ -336,3 +336,23 @@ license, matching lattice-aggregation. Before publishing, the tree and history w
 for keys, tokens, addresses and local paths (none found), and links to the related projects
 that are not public were reworded. MIT carries no patent grant; Apache-2.0 was the
 alternative considered.
+
+# v0.3 direction: verifier compatibility
+
+**D-67. Exact `ExpandMask` becomes optional.** On 2026-11-24 the owner approved the path in
+docs/PRODUCTION_PATH.md. The product requirement is now "any FIPS 204 verifier accepts the
+signature"; reproducing the deterministic FIPS 204 signer bit for bit is an optional mode (the
+tower with the MP-SPDZ backend). Reason: the exact mask costs about 1,940 MPC rounds per
+attempt, and schemes published in 2026 avoid it entirely. Cost: signatures from the new path
+are not those of a FIPS 204 signer, so "FIPS 204-compliant signing module" must not be
+claimed for it; "verifies under FIPS 204" is the accurate statement.
+
+**D-68. Prototype the three-round protocol from the paper.** `mithril.rs` follows "Efficient
+Threshold ML-DSA" (USENIX Security 2026) at its ML-DSA-65 parameters. Written from the paper;
+the authors' Go implementation was not located. Deviations: a greedy balanced share partition
+instead of the max-flow optimum, `f64` hyperball sampling, trusted dealer only.
+
+**D-69. Flat committee first.** The paper's scheme stops at about six parties and its cost
+grows fast with the threshold, so the first deployable shape is one committee of up to six
+operators with a small threshold. How leaf committees compose into a tower under this protocol
+is open (docs/PRODUCTION_PATH.md, step 3).

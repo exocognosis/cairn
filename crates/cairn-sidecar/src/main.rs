@@ -24,6 +24,10 @@ Single process (simulation harness):
   cairn verify --certificate <file.pqcc> --public-key <file>
       Verify a certificate with RustCrypto ml-dsa (exit code 2 if it does not verify).
   cairn bench [--signatures <n>] [--json <file>]
+  cairn mithril-demo [--threshold <t>] [--parties <n>] [--out <dir>]
+  cairn mithril-bench [--signatures <n>]
+      Prototype of the three-round protocol without MPC (signatures verify under FIPS 204 but
+      are not the deterministic ones). In-process; see docs/PRODUCTION_PATH.md.
 
 Multi-process cluster:
   cairn keygen --out <dir> [--seed-hex <64 hex>] [--host <ip>] [--base-port <port>]
@@ -431,6 +435,91 @@ fn run(args: &[String]) -> Result<(), String> {
             let result = bench::measure(&mut signer, &pk, bench::Scenario::Healthy, n, 0, nodes)?;
             println!("{}", bench::cluster_markdown(std::slice::from_ref(&result)));
             println!("{:#}", bench::cluster_json(&result));
+            Ok(())
+        }
+        Some("mithril-demo") => {
+            use threshold_mldsa::mithril;
+            let t: usize = arg(args, "--threshold")
+                .map_or(Ok(3), |v| v.parse())
+                .map_err(|_| "bad --threshold")?;
+            let n: usize = arg(args, "--parties")
+                .map_or(Ok(4), |v| v.parse())
+                .map_err(|_| "bad --parties")?;
+            let out = PathBuf::from(arg(args, "--out").unwrap_or_else(|| "out-mithril".into()));
+            let (key, parties) =
+                mithril::keygen(t, n, &mut OsRng).ok_or("no parameter set for that (T, N)")?;
+            let checkpoint = Checkpoint {
+                chain: "cosmos:cairn-devnet-1".into(),
+                epoch: 1,
+                height: 1200,
+                block_hash: rand::random::<[u8; 32]>().to_vec(),
+                finality_commitment: rand::random::<[u8; 32]>().to_vec(),
+            };
+            let key_id = cairn_sidecar::key_id(&key.pk);
+            let message = checkpoint
+                .signing_message(&key_id)
+                .map_err(|e| e.to_string())?;
+            let active: Vec<u8> = (0..t as u8).collect();
+            let start = std::time::Instant::now();
+            let (signature, stats) =
+                mithril::sign_local(&key, &parties, &active, &message, &mut OsRng)
+                    .ok_or("signing did not finish")?;
+            let elapsed = start.elapsed();
+            let certificate = Certificate {
+                checkpoint,
+                key_id,
+                signature: Box::new(signature),
+            };
+            let file = write_certificate(&out, &certificate).map_err(|e| e.to_string())?;
+            let pk = out.join("public_key.hex");
+            write_public_key(&pk, &key.pk).map_err(|e| e.to_string())?;
+            let summary = verify_files(&file, &pk)?;
+            println!(
+                "{}",
+                json!({
+                    "scheme": "three-round threshold ML-DSA-65 (Mithril prototype)",
+                    "threshold": t, "parties": n,
+                    "certificate": file, "public_key": pk,
+                    "executions": stats.executions,
+                    "bytes_per_party_per_execution": stats.bytes_per_party,
+                    "elapsed_ms": elapsed.as_secs_f64() * 1e3,
+                    "verified": summary["valid"],
+                })
+            );
+            Ok(())
+        }
+        Some("mithril-bench") => {
+            use threshold_mldsa::mithril;
+            let n_sig: u32 = arg(args, "--signatures")
+                .map_or(Ok(50), |v| v.parse())
+                .map_err(|_| "bad --signatures")?;
+            println!("| T-of-N | K | signatures | executions (mean / max) | compute ms per signature (mean / p95) | kB per party per execution |\n|---|---|---|---|---|---|");
+            for (t, n) in [(2usize, 3usize), (3, 4), (3, 5), (4, 4), (2, 6)] {
+                let (key, parties) = mithril::keygen(t, n, &mut OsRng).ok_or("no parameter set")?;
+                let active: Vec<u8> = (0..t as u8).collect();
+                let (mut ms_all, mut execs, mut max_exec, mut bytes) =
+                    (Vec::new(), 0u32, 0u32, 0usize);
+                for i in 0..n_sig {
+                    let message = format!("pqc-sidecar/checkpoint/v2 bench {i}").into_bytes();
+                    let start = std::time::Instant::now();
+                    let (_, stats) =
+                        mithril::sign_local(&key, &parties, &active, &message, &mut OsRng)
+                            .ok_or("signing did not finish")?;
+                    ms_all.push(start.elapsed().as_secs_f64() * 1e3);
+                    execs += stats.executions;
+                    max_exec = max_exec.max(stats.executions);
+                    bytes = bytes.max(stats.bytes_per_party);
+                }
+                ms_all.sort_by(|a, b| a.total_cmp(b));
+                let mean = ms_all.iter().sum::<f64>() / ms_all.len() as f64;
+                let p95 = ms_all[((ms_all.len() - 1) as f64 * 0.95).round() as usize];
+                println!(
+                    "| {t}-of-{n} | {} | {n_sig} | {:.2} / {max_exec} | {mean:.0} / {p95:.0} | {:.0} |",
+                    key.params.reps,
+                    execs as f64 / n_sig as f64,
+                    bytes as f64 / 1e3
+                );
+            }
             Ok(())
         }
         _ => Err(USAGE.into()),

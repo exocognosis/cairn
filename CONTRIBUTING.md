@@ -33,9 +33,9 @@ CI runs the same three checks.
 
 ## Rules that are not negotiable
 
-- **Output stays FIPS 204.** `ExpandMask` is the exact standard function, encodings are
-  standard, and no verifier is modified. A change that breaks the byte-for-byte comparison
-  with the reference signer is a bug.
+- **Any FIPS 204 verifier accepts the output.** Encodings are standard and no verifier is
+  modified. In the tower design `ExpandMask` is also the exact standard function, and a change
+  that breaks its byte-for-byte comparison with the reference signer is a bug.
 - **No committee larger than six**, and the root MPC stays at three parties.
 - **A rejected attempt reveals one bit.** Do not add logging, messages or errors that expose
   which bound failed or any value of a rejected attempt.

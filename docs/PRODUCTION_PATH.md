@@ -111,3 +111,52 @@ but the certificate format and verifiers change). Pick one after step 2 is measu
    contact the authors early. Alternative: wrap their Go implementation behind the bridge.
 5. **Is "zero verifier changes" still absolute?** Recommended: yes. It is the property that
    distinguishes this project.
+
+## Update, same day: decision and first prototype
+
+The owner approved the path above, including question 1: **verifier compatibility is the
+requirement, and exact `ExpandMask` becomes an optional mode** (the existing tower and MP-SPDZ
+path).
+
+With the paper in hand (the full version, 37 pages, including the ML-DSA-65 parameter table),
+step 2 has a first prototype: `crates/threshold-mldsa/src/mithril.rs`. It implements the
+paper's trusted-dealer key generation, the three signing rounds with `K` parallel repetitions
+and imbalanced hyperball rejection, and the public combine, at the published ML-DSA-65
+parameters.
+
+What was checked:
+
+- Certificates signed by a 3-of-4 committee are accepted by unmodified `pqc-sidecar verify`,
+  the `pqc-sidecar-verify` npm package and RustCrypto `ml-dsa`.
+- Every signing subset of 2-of-3 and 3-of-4 produces valid signatures; a wrong opening is
+  refused; fewer than `T` parties are missing at least one secret.
+
+Measured in one process on an Apple M3 (`cairn mithril-bench --signatures 50`), all parties'
+work included, with this repository's slow reference arithmetic:
+
+| T-of-N | K | executions per signature (mean / max) | compute ms per signature (mean / p95) | kB per party per execution |
+|---|---|---|---|---|
+| 2-of-3 | 5 | 2.34 / 7 | 67 / 170 | 35 |
+| 3-of-4 | 20 | 2.54 / 10 | 427 / 1,341 | 130 |
+| 3-of-5 | 62 | 1.78 / 6 | 923 / 2,588 | 357 |
+| 4-of-4 | 26 | 1.82 / 7 | 536 / 1,763 | 169 |
+| 2-of-6 | 8 | 1.74 / 8 | 78 / 223 | 55 |
+
+Reading it:
+
+- An execution is three message rounds. At the 178 ms round trip of the two-host run, a 3-of-4
+  signature would cost about `2.5 x 3 x 0.18 s`, roughly 1.4 s of network time, plus compute.
+  That is a projection from these numbers; the protocol has not been run over the network yet.
+  The comparable measured figure for the current design is 21 s.
+- The paper targets a success probability of one half per execution, so about two executions
+  on average. Ours is slightly worse for the small sets, which is consistent with the simpler
+  share partition used here but has not been investigated.
+- Cost rises steeply with the threshold: the paper's `K` for 4-of-6 is 804 and for 5-of-6 is
+  1,200 (6 to 9 MB per party per execution). Small thresholds are the practical range.
+
+What the prototype is not: a secure implementation. Floating-point sampling, a trusted dealer,
+no distributed key generation, no network path, not constant time, and written from the paper
+without comparison against the authors' code.
+
+Next: put the three rounds on the existing node and TLS transport (signers talk to each other
+through the coordinator; no root engines), then measure across hosts.

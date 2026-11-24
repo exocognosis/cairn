@@ -472,6 +472,25 @@ pub fn keygen_internal(xi: &[u8; 32]) -> ExpandedKey {
     }
 }
 
+/// Round `t`, encode the standard public key and hash it. Returns `(pk, t1, tr)`.
+pub fn public_key_from_t(
+    rho: &[u8; 32],
+    t: &[Poly],
+) -> ([u8; PUBLIC_KEY_BYTES], PolyVec, [u8; 64]) {
+    let t1: PolyVec = t.iter().map(|p| p.map(|c| power2round(c).0)).collect();
+    let mut pk = Vec::with_capacity(PUBLIC_KEY_BYTES);
+    pk.extend_from_slice(rho);
+    pack_bits(
+        t1.iter().flat_map(|p| p.iter().map(|&c| c as u32)),
+        10,
+        &mut pk,
+    );
+    let pk: [u8; PUBLIC_KEY_BYTES] = pk.try_into().expect("public key length");
+    let mut tr = [0u8; 64];
+    shake256(&[&pk], &mut tr);
+    (pk, t1, tr)
+}
+
 /// Message representative `mu = H(tr || 0 || len(ctx) || ctx || M)` for pure ML-DSA.Sign.
 pub fn message_representative(tr: &[u8; 64], ctx: &[u8], message: &[u8]) -> [u8; 64] {
     assert!(ctx.len() <= 255, "context longer than 255 bytes");

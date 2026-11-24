@@ -12,6 +12,7 @@ pub mod engine;
 pub mod fips204;
 pub mod flatten;
 pub mod keys;
+pub mod mithril;
 pub mod party;
 pub mod protocol;
 pub mod session;

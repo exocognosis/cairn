@@ -58,6 +58,22 @@ cairn is a **research preview, not custody software**. The three gaps that matte
 Nothing here has had outside review. [Status and limits](#status-and-limits) has the full
 list and [ROADMAP.md](ROADMAP.md) says what closing each gap takes.
 
+## New direction: a second, much faster protocol (prototype)
+
+Recent work shows the secret mask does not have to be computed inside an MPC at all. The
+repository now also contains a prototype of the three-round protocol of *Efficient Threshold
+ML-DSA* (USENIX Security 2026): no MPC, a few hundred milliseconds of compute, and signatures
+that the same unmodified verifiers accept. They are valid ML-DSA-65 signatures, but not the
+ones a deterministic FIPS 204 signer would produce. It runs in one process only for now.
+
+```bash
+cargo run --release -p cairn-sidecar -- mithril-demo --threshold 3 --parties 4
+```
+
+[docs/PRODUCTION_PATH.md](docs/PRODUCTION_PATH.md) has the comparison, the measurements and
+what is missing. Everything below describes the original design, which remains the "exact
+FIPS 204 signer" mode.
+
 ## Try it in five minutes
 
 Requires Rust 1.80 or newer on macOS or Linux.
@@ -400,8 +416,8 @@ delivers. To get in touch, write to
 
 ## Hard invariants
 
-- Signatures are FIPS 204 ML-DSA-65: `ExpandMask` is the exact SHAKE256 expansion (never random
-  nonce sampling), encodings are standard (pk 1,952 bytes, signature 3,309 bytes), and no
+- In the tower design, signatures are FIPS 204 ML-DSA-65 with the exact SHAKE256 `ExpandMask`
+  (never random nonce sampling; the three-round prototype is the documented exception), encodings are standard (pk 1,952 bytes, signature 3,309 bytes), and no
   verifier is modified. Every path (in-process tower, IPC engine, TCP cluster of processes) is
   tested byte-for-byte against a single-key deterministic signer and RustCrypto `ml-dsa`.
 - Every interactive committee has N ≤ 6; the root MPC has N = 3.
