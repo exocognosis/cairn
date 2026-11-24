@@ -13,6 +13,7 @@
 use crate::certifier::TowerCertifier;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::{json, Value};
+use sha3::{Digest, Sha3_256};
 use std::io::Read as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -48,6 +49,10 @@ impl<E: AttemptEngine + Send + 'static> KmsSigner for TowerCertifier<E> {
     }
 }
 
+/// Finished signatures by message digest.
+type Cache = std::collections::HashMap<[u8; 32], Box<[u8; SIGNATURE_BYTES]>>;
+const SIGNATURE_CACHE: usize = 256;
+
 pub struct KmsEndpoint {
     pub addr: SocketAddr,
     server: Arc<Server>,
@@ -76,7 +81,12 @@ impl Drop for KmsEndpoint {
     }
 }
 
-fn handle(certifier: &mut dyn KmsSigner, target: &str, body: &[u8]) -> (u16, Value) {
+fn handle(
+    certifier: &mut dyn KmsSigner,
+    cache: &mut Cache,
+    target: &str,
+    body: &[u8],
+) -> (u16, Value) {
     let error = |code: &str, msg: &str| (400, json!({ "__type": code, "message": msg }));
     let req: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     let key = req["KeyId"].as_str().unwrap_or("").to_owned();
@@ -107,15 +117,30 @@ fn handle(certifier: &mut dyn KmsSigner, target: &str, body: &[u8]) -> (u16, Val
             if message.len() > MAX_RAW_MESSAGE {
                 return error("ValidationException", "Message longer than 4096 bytes");
             }
-            match certifier.sign(&message) {
-                Ok(signed) => (
-                    200,
-                    json!({
-                        "KeyId": key,
-                        "Signature": B64.encode(signed),
-                        "SigningAlgorithm": "ML_DSA_SHAKE_256",
-                    }),
-                ),
+            // Signing is deterministic, so a finished signature can answer any later request for
+            // the same message. pqc-sidecar's KMS client gives up on a call after a few seconds
+            // and retries; with a slow MPC backend the retry finds the result here instead of
+            // starting the session again.
+            let digest: [u8; 32] = Sha3_256::digest(&message).into();
+            let signed = match cache.get(&digest) {
+                Some(signature) => Ok(**signature),
+                None => certifier.sign(&message),
+            };
+            match signed {
+                Ok(signed) => {
+                    if cache.len() >= SIGNATURE_CACHE {
+                        cache.clear();
+                    }
+                    cache.insert(digest, Box::new(signed));
+                    (
+                        200,
+                        json!({
+                            "KeyId": key,
+                            "Signature": B64.encode(signed),
+                            "SigningAlgorithm": "ML_DSA_SHAKE_256",
+                        }),
+                    )
+                }
                 // The tower could not sign (quorum lost, retries exhausted). Retryable.
                 Err(e) => (
                     500,
@@ -137,6 +162,7 @@ pub fn serve(listen: &str, mut certifier: impl KmsSigner) -> std::io::Result<Kms
     let worker = {
         let server = server.clone();
         std::thread::spawn(move || {
+            let mut cache = Cache::new();
             for mut request in server.incoming_requests() {
                 let target = request
                     .headers()
@@ -153,7 +179,7 @@ pub fn serve(listen: &str, mut certifier: impl KmsSigner) -> std::io::Result<Kms
                 {
                     continue;
                 }
-                let (status, value) = handle(&mut certifier, &target, &body);
+                let (status, value) = handle(&mut certifier, &mut cache, &target, &body);
                 let header = Header::from_bytes("Content-Type", "application/x-amz-json-1.1")
                     .expect("static header");
                 let _ = request.respond(

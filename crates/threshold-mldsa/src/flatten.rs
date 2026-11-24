@@ -11,9 +11,9 @@
 //! of its signers' `lambda_j * share`, and that sum is never formed; a root engine sees one
 //! uniform sub-share of each signer.
 //!
-//! What this does and does not preserve is spelled out in ARCHITECTURE.md ("Trust during
-//! signing"): the shares at rest keep the tower's access structure, but for the duration of a
-//! signing session the key is 3-party shared among the root engines.
+//! What this does and does not preserve is spelled out in ARCHITECTURE.md §10.6: the shares at
+//! rest keep the tower's access structure, but for the duration of a signing session the key is
+//! 3-party shared among the root engines.
 
 use crate::fips204::{
     self, challenge_mul, fq_mul, mat_vec_coeff, red, sample_in_ball, vec_add, vec_sub, MatrixHat,

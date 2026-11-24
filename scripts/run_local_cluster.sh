@@ -6,6 +6,10 @@
 #   scripts/run_local_cluster.sh [--dir DIR] [--base-port 7100] [--kms-port 8200]
 #                                [--rtt-ms 0] [--fault leaf_1/signer_1=stall,...]
 #
+# Set CAIRN_MPC_SOCKET_DIR to use an MPC backend that is already running there (for example the
+# MP-SPDZ bridges of mpc/mp-spdz/run_bridge.sh) instead of the reference worker, and
+# CAIRN_MPC_TIMEOUT_MS to give its phases time (default 30000; 900000 when a backend is given).
+#
 # Stop with Ctrl-C. Logs and keys are under DIR (default target/local-cluster).
 # The MPC worker is the clear-text reference backend: this is a test cluster, not custody.
 set -euo pipefail
@@ -21,14 +25,18 @@ done
 cargo build --quiet --release -p cairn-sidecar
 CAIRN="$PWD/target/release/cairn"
 rm -rf "$DIR" && mkdir -p "$DIR/logs"
-SOCK="$(mktemp -d /tmp/cairn-mpc.XXXXXX)"   # Unix socket paths must be short
+EXTERNAL="${CAIRN_MPC_SOCKET_DIR:-}"
+if [ -n "$EXTERNAL" ]; then SOCK="$EXTERNAL"; else SOCK="$(mktemp -d /tmp/cairn-mpc.XXXXXX)"; fi   # short path
+MPC_MS="${CAIRN_MPC_TIMEOUT_MS:-$([ -n "$EXTERNAL" ] && echo 900000 || echo 30000)}"
 DELAY=$((RTT / 2))
 PIDS=()
-cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$SOCK"; }
+cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; [ -n "$EXTERNAL" ] || rm -rf "$SOCK"; }
 trap cleanup EXIT INT TERM
 
 "$CAIRN" keygen --out "$DIR/keys" --base-port "$BASE" > "$DIR/keygen.json"
-"$CAIRN" mpc-worker --socket-dir "$SOCK" 2> "$DIR/logs/mpc-worker.log" & PIDS+=($!)
+if [ -z "$EXTERNAL" ]; then
+  "$CAIRN" mpc-worker --socket-dir "$SOCK" 2> "$DIR/logs/mpc-worker.log" & PIDS+=($!)
+fi
 
 fault_of() { echo ",$FAULTS," | sed -n "s#.*,$1=\([a-z-]*\),.*#\1#p"; }
 port=$BASE
@@ -43,12 +51,12 @@ done; done
 for root in 1 2 3 4; do
   id="root_${root}"; f="$(fault_of "$id")"
   "$CAIRN" node --role root --id "$id" --bind "127.0.0.1:$port" \
-    --peers "$DIR/keys/peers.json" --group "$DIR/keys/group.bin" --mpc-socket-dir "$SOCK" \
+    --peers "$DIR/keys/peers.json" --group "$DIR/keys/group.bin" --mpc-socket-dir "$SOCK" --mpc-timeout-ms "$MPC_MS" \
     --link-delay-ms "$DELAY" --fault "${f:-none}" 2> "$DIR/logs/root_${root}.log" & PIDS+=($!)
   port=$((port + 1))
 done
 "$CAIRN" serve-kms --listen "127.0.0.1:$KMS" --peers "$DIR/keys/peers.json" --group "$DIR/keys/group.bin" \
-  --public-key-out "$DIR/public_key.hex" --link-delay-ms "$DELAY" 2> "$DIR/logs/serve-kms.log" & PIDS+=($!)
+  --public-key-out "$DIR/public_key.hex" --mpc-timeout-ms "$MPC_MS" --link-delay-ms "$DELAY" 2> "$DIR/logs/serve-kms.log" & PIDS+=($!)
 
 for _ in $(seq 100); do nc -z 127.0.0.1 "$KMS" 2>/dev/null && break; sleep 0.1; done
 echo "cairn cluster up: 16 signers + 4 root engines + MPC worker (ports $BASE-$((port - 1)))"

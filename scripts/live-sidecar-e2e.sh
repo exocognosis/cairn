@@ -53,7 +53,7 @@ echo "GetPublicKey: stock pqc-sidecar read the tower public key"
 
 "$SIDECAR" --config "$DIR/sidecar/config.toml" > "$DIR/logs/pqc-sidecar.log" 2>&1 & PIDS+=($!)
 CERT="$DIR/sidecar/certs/00000000000000000100.pqcc"
-for _ in $(seq 300); do [ -s "$CERT" ] && break; sleep 0.2; done
+for _ in $(seq "${CAIRN_CERT_WAIT_TICKS:-300}"); do [ -s "$CERT" ] && break; sleep 0.2; done
 [ -s "$CERT" ] || { tail -5 "$DIR/logs/pqc-sidecar.log"; echo "no certificate written" >&2; exit 1; }
 echo "Sign: stock pqc-sidecar wrote $CERT"
 
