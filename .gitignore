@@ -1,0 +1,5 @@
+/target
+/out
+*.pqcc
+!crates/cairn-sidecar/tests/fixtures/*.pqcc
+.DS_Store

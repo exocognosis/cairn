@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["crates/threshold-mldsa"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+publish = false
+repository = "https://github.com/exocognosis/cairn"
+
+[workspace.dependencies]
+base64 = "0.22"
+bincode = "1.3"
+hex = "0.4"
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha3 = "0.10"
+thiserror = "1"
+tiny_http = "0.12"
+zeroize = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.test]
+opt-level = 2
