@@ -91,11 +91,10 @@ async fn stalled_signer_costs_one_real_deadline_then_is_skipped() {
     assert_eq!(report.faults[0].kind, NetFaultKind::Timeout);
     assert!(!report.signers.contains(&signer(1, 1)) && report.signers.contains(&signer(1, 4)));
 
-    // Excluded now: the next checkpoint does not wait for it.
-    let start = Instant::now();
+    // Excluded now: the next checkpoint does not contact it, so it cannot cost a deadline.
     let (_, report) = coordinator.sign(&message("stall-2")).await.unwrap();
     assert!(report.faults.is_empty());
-    assert!(start.elapsed() < TIMEOUT, "{:?}", start.elapsed());
+    assert!(!report.coordinator_bytes.contains_key(&signer(1, 1)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
