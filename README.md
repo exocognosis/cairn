@@ -93,7 +93,7 @@ the live sidecar flow and two-host deployment.
 ML-DSA signing is hostile to MPC. `ExpandMask` is SHAKE256 over a secret seed, `HighBits` and
 `LowBits` are non-linear rounding, and Fiat-Shamir with aborts repeats the whole computation
 about five times per signature. The predecessor prototype
-([lattice-aggregation](https://github.com/exocognosis/lattice-aggregation)) ran the exact FIPS
+(lattice-aggregation, by the same author, not yet public) ran the exact FIPS
 204 mask inside a malicious-secure dishonest-majority MPC: N = 4 (3-of-4) costs 28 GB of
 traffic, N = 5 costs 55 GB, and N = 6 failed on a 16 GiB host. One MPC over a validator set is
 not an option.
@@ -399,10 +399,12 @@ delivers. To get in touch, open an issue on this repository.
 
 ## Citing
 
-See [CITATION.cff](CITATION.cff). cairn builds on
-[lattice-aggregation](https://github.com/exocognosis/lattice-aggregation) (the predecessor
-prototype and its MP-SPDZ programs) and integrates with
-[pqc-sidecar-verify](https://github.com/exocognosis/pqc-sidecar-verify).
+See [CITATION.cff](CITATION.cff). cairn builds on lattice-aggregation, the predecessor
+prototype by the same author, which is not yet public: its measurements are quoted above and
+the helper section of the MP-SPDZ program here is adapted from it. cairn integrates with
+PQC Sidecar, whose daemon is also not public; its certificate format and verifier are, as
+[pqc-sidecar-verify](https://github.com/exocognosis/pqc-sidecar-verify). Without the daemon
+the live sidecar tests print `SKIPPED`; everything else runs.
 
 ## License
 
