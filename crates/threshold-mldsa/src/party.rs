@@ -55,6 +55,8 @@ pub trait Party {
     fn probe(&mut self, n: u32) -> bool;
     /// Erase all per-attempt state.
     fn reset(&mut self);
+    /// Forget exclusions and suspensions (start of an epoch, or an operator decision).
+    fn reinstate(&mut self);
 }
 
 /// Scripted deviations, for tests and fault benchmarks.
@@ -277,6 +279,8 @@ impl Party for Signer {
     fn reset(&mut self) {
         self.state.erase();
     }
+
+    fn reinstate(&mut self) {}
 }
 
 /// A `t`-of-`n` committee (`n <= 6`) of parties, itself a party of its parent.
@@ -513,5 +517,11 @@ impl<P: Party> Party for Committee<P> {
         self.active.clear();
         self.commitments.clear();
         self.members.iter_mut().for_each(Party::reset);
+    }
+
+    fn reinstate(&mut self) {
+        self.excluded.clear();
+        self.suspended = None;
+        self.members.iter_mut().for_each(Party::reinstate);
     }
 }
