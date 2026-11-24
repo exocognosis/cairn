@@ -4,7 +4,8 @@ use cairn_net::cluster as net;
 use cairn_net::{FaultMode, Link, NetPolicy, NodeId, Peers, RootNode, SignerNode, TlsIdentity};
 use cairn_sidecar::cluster::{ClusterSigner, MockChain};
 use cairn_sidecar::{
-    bench, kms, write_certificate, write_public_key, CertifierConfig, Checkpoint, TowerCertifier,
+    bench, kms, write_certificate, write_public_key, Certificate, CertifierConfig, Checkpoint,
+    TowerCertifier,
 };
 use cascade_tower::{Tower, TowerParams};
 use rand::rngs::OsRng;
@@ -20,6 +21,8 @@ cairn: committee-tower threshold ML-DSA-65 checkpoint signing (v2, research buil
 
 Single process (simulation harness):
   cairn demo [--out <dir>] [--height <n>] [--interval <k>] [--seed-hex <64 hex>]
+  cairn verify --certificate <file.pqcc> --public-key <file>
+      Verify a certificate with RustCrypto ml-dsa (exit code 2 if it does not verify).
   cairn bench [--signatures <n>] [--json <file>]
 
 Multi-process cluster:
@@ -53,6 +56,37 @@ fn arg(args: &[String], name: &str) -> Option<String> {
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1))
         .cloned()
+}
+
+fn read_public_key(
+    path: &std::path::Path,
+) -> Result<[u8; threshold_mldsa::PUBLIC_KEY_BYTES], String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    hex::decode(text.trim())
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| format!("{} is not a hex ML-DSA-65 public key", path.display()))
+}
+
+/// Decode a `.pqcc` v2 certificate and verify it under a public key with RustCrypto `ml-dsa`.
+fn verify_files(cert: &std::path::Path, pk: &std::path::Path) -> Result<serde_json::Value, String> {
+    let bytes = std::fs::read(cert).map_err(|e| format!("{}: {e}", cert.display()))?;
+    let certificate = Certificate::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    certificate
+        .verify(&read_public_key(pk)?)
+        .map_err(|e| e.to_string())?;
+    let c = &certificate.checkpoint;
+    Ok(json!({
+        "valid": true,
+        "format": 2,
+        "scheme": "ML-DSA-65",
+        "chain_id": c.chain,
+        "epoch": c.epoch,
+        "height": c.height,
+        "block_hash": hex::encode_upper(&c.block_hash),
+        "finality_commitment": hex::encode_upper(&c.finality_commitment),
+        "key_id": hex::encode(certificate.key_id),
+    }))
 }
 
 fn ms(args: &[String], name: &str, default: u64) -> Result<u64, String> {
@@ -116,7 +150,12 @@ fn run(args: &[String]) -> Result<(), String> {
             };
             let (certificate, report) =
                 certifier.certify(&checkpoint).map_err(|e| e.to_string())?;
-            let file = write_certificate(&out, &certificate).map_err(|e| e.to_string())?;
+            let file = write_certificate(&out, &certificate).map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => {
+                    format!("{e} already exists (certificates are never overwritten); pass another --out")
+                }
+                _ => e.to_string(),
+            })?;
             let pk = out.join("public_key.hex");
             write_public_key(&pk, certifier.public_key()).map_err(|e| e.to_string())?;
             println!(
@@ -133,11 +172,34 @@ fn run(args: &[String]) -> Result<(), String> {
                     "key_id": hex::encode(certificate.key_id),
                 })
             );
+            // Check what is on disk, the way an outside verifier would, and that tampering fails.
+            let summary = verify_files(&file, &pk)?;
+            let mut tampered = std::fs::read(&file).map_err(|e| e.to_string())?;
+            let at = tampered.len() - 3000;
+            tampered[at] ^= 1;
+            let pk_bytes = read_public_key(&pk)?;
+            let rejected =
+                Certificate::from_bytes(&tampered).map_or(true, |c| c.verify(&pk_bytes).is_err());
+            if !rejected {
+                return Err("a tampered certificate verified".into());
+            }
             eprintln!(
-                "verify: pqc-sidecar verify --certificate {} --public-key {}",
+                "OK: 16 signers produced one standard ML-DSA-65 signature; verified from disk with \
+                 RustCrypto ml-dsa (height {}), tampered copy rejected.\n\
+                 Check it again any time: cairn verify --certificate {} --public-key {}",
+                summary["height"],
                 file.display(),
                 pk.display()
             );
+            Ok(())
+        }
+        Some("verify") => {
+            let cert = PathBuf::from(
+                arg(args, "--certificate").ok_or("verify needs --certificate <file.pqcc>")?,
+            );
+            let pk =
+                PathBuf::from(arg(args, "--public-key").ok_or("verify needs --public-key <file>")?);
+            println!("{}", verify_files(&cert, &pk)?);
             Ok(())
         }
         Some("bench") => {

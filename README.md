@@ -70,8 +70,16 @@ git clone https://github.com/exocognosis/cairn.git && cd cairn && cargo test --w
 cargo run --release -p cairn-sidecar -- demo --out out
 ```
 
-The second command deals a 16-signer tower, signs a sample checkpoint and writes
-`out/00000000000000001200.pqcc` and `out/public_key.hex`. To watch 21 separate processes do it
+The second command needs nothing else installed. It deals a 16-signer tower, signs a sample
+checkpoint, writes `out/00000000000000001200.pqcc` and `out/public_key.hex`, then verifies the
+file from disk with RustCrypto `ml-dsa` and confirms a tampered copy is rejected. Check the
+certificate again at any time:
+
+```bash
+cargo run --release -p cairn-sidecar -- verify --certificate out/00000000000000001200.pqcc --public-key out/public_key.hex
+```
+
+In this demo all sixteen signers run inside one process. To watch 21 separate processes do it
 over TLS, run `./scripts/run_local_cluster.sh`. [Running it](#running-it) covers the cluster,
 the live sidecar flow and two-host deployment.
 
@@ -245,7 +253,8 @@ interval = 100   # checkpoint cadence: every K finalized blocks
 
 | Command | What it does |
 |---|---|
-| `cairn demo` | One process: deal a tower, sign a sample checkpoint, write the certificate. |
+| `cairn demo` | One process: deal a tower, sign a sample checkpoint, write and verify the certificate. |
+| `cairn verify --certificate <f> --public-key <f>` | Verify a `.pqcc` certificate with RustCrypto `ml-dsa`. |
 | `cairn keygen --out <dir>` | Create the key shares, address book and TLS certificates for a cluster. |
 | `cairn node --role signer\|root ...` | Run one signer or one root engine. |
 | `cairn mpc-worker --socket-dir <dir>` | Run the stand-in MPC backend (clear text, for testing). |

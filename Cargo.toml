@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/threshold-mldsa", "crates/cascade-tower", "crates/mpc-bridge", "crates/cairn-net", "crates/cairn-sidecar"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 publish = false
