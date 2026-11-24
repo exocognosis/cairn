@@ -15,6 +15,10 @@ keys, outside review, a real chain. Those are the milestones below.
 Effort figures are rough estimates for one experienced engineer and have not been validated
 by doing the work.
 
+> **Read first:** [docs/PRODUCTION_PATH.md](docs/PRODUCTION_PATH.md) compares cairn with
+> threshold ML-DSA schemes published in 2026 and recommends changing the root computation
+> before finishing the milestones below as written.
+
 ## Milestones
 
 ### M1. MPC parties on three hosts

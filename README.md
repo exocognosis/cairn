@@ -93,6 +93,7 @@ the live sidecar flow and two-host deployment.
 | The protocol, message by message | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | Why each design choice was made (65 entries) | [DECISIONS.md](DECISIONS.md) |
 | What is planned and what funding would buy | [ROADMAP.md](ROADMAP.md) |
+| The gap to a production BLS replacement, and recent related work | [docs/PRODUCTION_PATH.md](docs/PRODUCTION_PATH.md) |
 | Running it on two machines | [DEPLOY_SPLIT.md](DEPLOY_SPLIT.md) |
 | The MP-SPDZ circuit | [mpc/mp-spdz/README.md](mpc/mp-spdz/README.md) |
 | Contributing or reporting a vulnerability | [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) |
