@@ -1,0 +1,841 @@
+"""ML-DSA-65 root-engine signing attempt for cairn: 3 parties, honest majority, over Z_q.
+
+Compile over the ML-DSA prime field (no mixed circuits, no edaBits):
+
+    compile.py -P 8380417 mldsa65_root_attempt mask
+    compile.py -P 8380417 mldsa65_root_attempt response
+
+and run with replicated-field-party.x (semi-honest) or malicious-rep-field-party.x, always
+with -P 8380417. replicated-ring-party.x computes mod 2^k and cannot be used: every share
+here is an element of Z_q, q = 8380417.
+
+The two programs are the two phases of one attempt. The secret commitment w = A y is carried
+from `mask` to `response` through MP-SPDZ persistence (Persistence/Transactions-P<i>.data,
+positions [0, 1536)). Everything is in the arithmetic domain: a bit is a Z_q element in
+{0, 1}, bit decomposition is the exact Nishide-Ohta method (as in MP-SPDZ BitDecFull), SHAKE256
+is an arithmetic Keccak. The helper section is taken from the lattice-aggregation prototype
+(mldsa65_sign_attempt.mpc).
+
+Inputs. Parties are 0, 1, 2 here (wire parties 1, 2, 3). All integers are in [0, q).
+
+  mask      private, party p (Player-Data/Input-P<p>-0):
+                32 context digest bytes, then k_share[32]
+            public (Programs/Public-Input/mldsa65_root_attempt-mask), same for all parties:
+                512 bits of mu (byte i bit b at 8 i + b), 80 bits of the nonces kappa + r
+                (r = 0..4, 16 bits each, LSB first), 7680 coefficients of A-hat = ExpandA(rho)
+                (row r, column s, coefficient j at 256 (5 r + s) + j)
+  response  private, party p: 32 context digest bytes, z_p[1280], r_p[1536]
+            public (…/mldsa65_root_attempt-response): A-hat[7680], c T_1, c T_2, c T_3
+                (1536 each, coefficient domain), c t0[1536], ct0_ok (1 iff ||c t0||_inf < gamma2)
+
+The context digest is computed by each party's bridge over everything that must be common
+(session, attempt, mu, rho; then session, c~, t0, T). The digests are opened and compared
+first, so parties that disagree on a public value stop before any secret-dependent opening.
+
+Openings (nothing else is revealed):
+
+  mask      the context digests; the validity bits of the candidate decomposition masks (a
+            function of fresh randomness only); the masked values of the bit decompositions
+            (uniform); one bit: all 32 sums of the K shares are below 256 (true for honest
+            inputs); c~ (48 bytes). Party p privately receives its additive share of y.
+  response  the context digests; D_p = A z_p - r_p - c T_p for p = 1, 2, 3 (identically zero
+            for an honest party p, a function of p's own inputs otherwise); mask validity bits
+            and masked values as above; the bit [||r - w||_inf <= beta]; if it is set, the
+            accept bit; if that is set, the hint h and z_1, z_2, z_3.
+
+Output lines (stdout of every party; cints may print as negative representatives):
+
+  fault <code> <party> <text>     code 1 blame (party 1..3), 2 unattributed, 3 protocol
+  ctilde_byte <v>                 48 lines, mask phase
+  mask_ok
+  reject | accept, then  h [..1536 bits..]  and  z1 [..], z2 [..], z3 [..]  (1280 each)
+  mldsa65_root_<phase>_complete
+"""
+
+from Compiler import comparison, floatingpoint, util
+from Compiler.library import else_, for_range, if_, if_e, print_ln, public_input, runtime_error_if
+from Compiler.types import cint, longint, regint, sint
+
+program.use_edabit(False)
+
+Q = 8380417
+N = 256
+K = 6
+L = 5
+GAMMA1 = 1 << 19
+GAMMA2 = (Q - 1) // 32
+BETA = 196
+OMEGA = 55
+INV_N = 8347681  # 256^-1 mod q
+PARTIES = 3
+DIGEST_BYTES = 32
+POS_W = 0
+
+if len(program.args) < 2 or program.args[1] not in ("mask", "response"):
+    raise ValueError("usage: mldsa65_root_attempt <mask|response> [parity|xor]")
+PHASE = program.args[1]
+THETA = program.args[2] if len(program.args) > 2 else "parity"
+assert THETA in ("parity", "xor")
+
+
+def brv8(x):
+    return int(f"{x:08b}"[::-1], 2)
+
+
+ZETAS = [pow(1753, brv8(i), Q) for i in range(N)]
+
+
+# --- vectors ------------------------------------------------------------------
+
+def const_vec(values):
+    arr = cint.Array(len(values))
+    arr.assign([v % Q for v in values])
+    return arr.get_vector()
+
+
+def concat(parts):
+    return sint.concat(parts)
+
+
+def vec_sum(v):
+    """Sum of a sint vector, as a size-1 sint."""
+    size = len(v)
+    while size > 1:
+        half = size // 2
+        head = v.get_vector(0, half) + v.get_vector(half, half)
+        if size % 2:
+            head = concat([head, v.get_vector(2 * half, 1)])
+        v, size = head, len(head)
+    return v
+
+
+# --- NTT (FIPS 204 Algorithms 41 and 42), local on shares -----------------------
+
+def ntt(vec, npoly):
+    w, m, length = vec, 0, 128
+    while length >= 1:
+        blocks = N // (2 * length)
+        twiddles = []
+        for p in range(npoly):
+            for block in range(blocks):
+                twiddles.extend([ZETAS[m + block + 1]] * length)
+        m += blocks
+        if length == 1:
+            lo = w.get_vector(0, N // 2 * npoly, skip=2)
+            hi = w.get_vector(1, N // 2 * npoly, skip=2)
+        else:
+            lo_parts, hi_parts = [], []
+            for p in range(npoly):
+                for block in range(blocks):
+                    base = N * p + 2 * length * block
+                    lo_parts.append(w.get_vector(base, length))
+                    hi_parts.append(w.get_vector(base + length, length))
+            lo, hi = concat(lo_parts), concat(hi_parts)
+        t = hi * const_vec(twiddles)
+        new_lo, new_hi = lo + t, lo - t
+        w = interleave(new_lo, new_hi, length, npoly)
+        length //= 2
+    return w
+
+
+def intt(vec, npoly):
+    w, m, length = vec, N, 1
+    while length < N:
+        blocks = N // (2 * length)
+        twiddles = []
+        for p in range(npoly):
+            for block in range(blocks):
+                twiddles.extend([-ZETAS[m - block - 1]] * length)
+        m -= blocks
+        if length == 1:
+            lo = w.get_vector(0, N // 2 * npoly, skip=2)
+            hi = w.get_vector(1, N // 2 * npoly, skip=2)
+        else:
+            lo_parts, hi_parts = [], []
+            for p in range(npoly):
+                for block in range(blocks):
+                    base = N * p + 2 * length * block
+                    lo_parts.append(w.get_vector(base, length))
+                    hi_parts.append(w.get_vector(base + length, length))
+            lo, hi = concat(lo_parts), concat(hi_parts)
+        new_lo = lo + hi
+        new_hi = (lo - hi) * const_vec(twiddles)
+        w = interleave(new_lo, new_hi, length, npoly)
+        length *= 2
+    return w * const_vec([INV_N] * (N * npoly))
+
+
+def interleave(lo, hi, length, npoly):
+    """Inverse of the split into butterfly halves."""
+    if length == 1:
+        return sint.zip(lo, hi)
+    parts, off = [], 0
+    for _ in range(npoly * N // (2 * length)):
+        parts.append(lo.get_vector(off, length))
+        parts.append(hi.get_vector(off, length))
+        off += length
+    return concat(parts)
+
+
+def tile(values, times):
+    return const_vec(list(values) * times)
+
+
+# --- bit arithmetic ---------------------------------------------------------------
+#
+# Bit lists are LSB first; a bit is a Z_q element in {0, 1} or a public int 0 or 1.
+# The adders are carry-lookahead adders: the carries come from a Sklansky
+# parallel-prefix network over the (generate, propagate) pairs of the positions, so
+# an n-bit addition takes ceil(log2 n) multiplication rounds where a ripple-carry
+# adder takes n. The sum bits then follow locally from a + b + c_i = s_i + 2 c_{i+1}.
+
+def xor(a, b):
+    return a + b - 2 * a * b
+
+
+def mul(a, b):
+    """a * b, free when either factor is a public int."""
+    if isinstance(b, int):
+        a, b = b, a
+    if isinstance(a, int):
+        return 0 if a == 0 else b if a == 1 else a * b
+    return a * b
+
+
+def pad(bits, width):
+    return [bits[i] if i < len(bits) else 0 for i in range(width)]
+
+
+def prefix_gp(gp, full=False):
+    """(G, P, nokill) of positions 0..i for each i, from (g, p, nokill) per position.
+
+    A group generates a carry (G), or passes the incoming one on (P); nokill means
+    G + P = 1. Level t of the network joins each position in the upper half of a
+    block of 2^(t+1) positions to the last position of the lower half: (g1, p1)
+    above (g0, p0) gives (g1 + p1 g0, p1 p0), and p1 p0 = p1 - p1 g0 when the lower
+    group cannot kill. The P of a group starting at position 0 is computed only if
+    full is set; with carry-in 0 it is not needed.
+    """
+    pre = list(gp)
+    step = 1
+    while step < len(pre):
+        for i in range(len(pre)):
+            if i // step % 2:
+                (g1, p1, k1), (g0, p0, k0) = pre[i], pre[i // step * step - 1]
+                t = mul(p1, g0)
+                if k0:
+                    p = p1 - t
+                elif full or i >= 2 * step:
+                    p = mul(p1, p0)
+                else:
+                    p = None
+                pre[i] = (g1 + t, p, k1 and k0)
+        step *= 2
+    return pre
+
+
+def sum_bits(a, b, pre, carry_in=0):
+    """Sum bits of a + b + carry_in from the prefix pairs of the positions."""
+    c = [carry_in] + [g + mul(p, carry_in) for g, p, _ in pre]
+    return [x + y + c[i] - 2 * c[i + 1] for i, (x, y) in enumerate(zip(a, b))]
+
+
+def half_adders(a, b):
+    """(g, p, nokill) of each position of a + b for secret bit lists a and b."""
+    out = []
+    for x, y in zip(a, b):
+        t = mul(x, y)
+        out.append((t, x + y - 2 * t, False))
+    return out
+
+
+def add_public(bits, k, width):
+    """Bits (LSB first) of value + k for a public constant k; the pairs are local."""
+    a = pad(bits, width)
+    kb = [(k >> i) & 1 for i in range(width)]
+    gp = [(x, 1 - x, True) if ki else (0, x, False) for x, ki in zip(a, kb)]
+    return sum_bits(a, kb, prefix_gp(gp))
+
+
+def add_bit(bits, e):
+    """Bits of value + e mod 2^len(bits) for a secret bit e.
+
+    The carry into position i + 1 is e times the prefix product bits[0] ... bits[i];
+    the products do not depend on e, so only one round follows e.
+    """
+    pre = prefix_gp([(0, x, False) for x in bits], full=True)
+    return sum_bits(bits, [0] * len(bits), pre, carry_in=e)
+
+
+def less_than(bits, k):
+    """[value < k] for public k, value given by its bits."""
+    return floatingpoint.BITLT(bits, util.bit_decompose(k, len(bits)), len(bits))
+
+
+SPARE_CANDIDATES = 64
+
+
+def first_valid(valid, total, size):
+    """Indices of the first size candidates whose (opened) validity bit is set."""
+    chosen = regint.Array(size)
+    count = regint.Array(1)
+    count[0] = 0
+
+    @for_range(total)
+    def _(i):
+        @if_((valid[i] != 0) * (count[0] < size))
+        def _():
+            chosen[count[0]] = i
+            count[0] = count[0] + 1
+
+    return chosen, count
+
+
+def random_masks(size):
+    """Bits (LSB first) of size uniform random elements r < q, as 23 sint arrays.
+
+    This is the rejection sampling of MP-SPDZ's BitDecFull (Nishide-Ohta),
+    vectorized. BitDecFull tests one element per round; here all candidates, plus
+    SPARE_CANDIDATES spares, are tested at once, and the first valid ones are
+    selected by clear indexing. The validity bits depend only on the fresh r, so
+    opening them reveals nothing. Each candidate fails with probability
+    (2^23 - q) / 2^23 < 0.001. Masks for several decompositions can be drawn at
+    once, before their values exist.
+    """
+    total = size + SPARE_CANDIDATES
+    candidates = [sint.get_random_bit(size=total) for _ in range(23)]
+    valid = cint.Array(total)
+    valid.assign(floatingpoint.BITLT(candidates, util.bit_decompose(Q, 23), 23).reveal())
+    chosen, count = first_valid(valid, total, size)
+    runtime_error_if(count[0] != size, "bad luck in bit decomposition")
+    sources = []
+    for bit in candidates:
+        arr = sint.Array(total)
+        arr.assign(bit)
+        sources.append(arr)
+    picked = [sint.Array(size) for _ in range(23)]
+
+    @for_range(size)
+    def _(j):
+        for bit in range(23):
+            picked[bit][j] = sources[bit][chosen[j]]
+
+    return picked
+
+
+# Compile-time record of which mask positions each decomposition uses. The security
+# argument (paper Lemma lem:otheropen) needs every mask in at most one masked opening.
+_MASK_USES = {}
+
+
+def _claim_masks(masks, base, size):
+    used = _MASK_USES.setdefault(id(masks), [])
+    for b0, s0 in used:
+        assert base + size <= b0 or b0 + s0 <= base, \
+            f"mask positions {base}..{base + size - 1} reused (already {b0}..{b0 + s0 - 1})"
+    assert base + size <= len(masks[0]), "decomposition runs past its masks"
+    used.append((base, size))
+
+
+def bit_decompose(value, masks=None, base=0):
+    """Exact bits (LSB first) of a vector of Z_q elements (MP-SPDZ BitDecFull).
+
+    Uses the masks from random_masks starting at position base, or fresh ones.
+    Each mask position is used at most once (checked at compile time).
+    """
+    size = len(value)
+    if masks is None:
+        masks = random_masks(size)
+    _claim_masks(masks, base, size)
+    bbits = [arr.get_vector(base, size) for arr in masks]
+    # From here on, exactly the tail of MP-SPDZ's BitDecFull.
+    b = sint.bit_compose(bbits)
+    c = (value - b).reveal(False)
+    cmodp = c
+    t = bbits[0].bit_decompose_clear(Q - c, 23)
+    c = longint(c, 23)
+    czero = c == 0
+    lt = bbits[0].long_one() - comparison.BitLTL_raw(bbits, t)
+    fbar = [bbits[0].clear_type.conv(cint(x)) for x in ((1 << 23) + c - Q).bit_decompose(23)]
+    fbard = bbits[0].bit_decompose_clear(cmodp, 23)
+    g = [lt.if_else(fbar[i], fbard[i]) for i in range(23)]
+    h = bbits[0].bit_adder(bbits, g)
+    abits = [bbits[0].clear_type(cint(czero)).if_else(bbits[i], h[i]) for i in range(23)]
+    return [sint.conv(bit) for bit in abits]
+
+
+def decompose(r, low=True):
+    """FIPS 204 Decompose on shares, by the formula of check_decompose_formula.py.
+
+    Returns the 4 bits of r1 = HighBits(r), the wrap bit, and the 19 bits of
+    u = (r + gamma2 - 1) mod 2 gamma2, from which LowBits(r) = u - gamma2 + 1 - wrap.
+    With low unset, u is not computed and None is returned in its place.
+    """
+    return decompose_bits(bit_decompose(r), low)
+
+
+def decompose_bits(bits, low=True):
+    """decompose, from the bits of r."""
+    x = add_public(bits, GAMMA2 - 1, 24)
+    a, b = pad(x[19:24], 10), x[9:19]
+    pre = prefix_gp(half_adders(a, b), full=True)
+    s = sum_bits(a, b, pre)  # s mod 1024; s = a + b < 2048
+    # e = [s >= 1023] is the carry out of a + b + 1, so the same network gives it.
+    e = pre[-1][0] + pre[-1][1]
+    m = add_bit(x[19:24], e)
+    if not low:
+        return m[0:4], m[4], None
+    return m[0:4], m[4], x[0:9] + add_bit(s, e)
+
+
+def low_bits_ok(u, wrap):
+    """[|LowBits(r)| < gamma2 - beta] from u and wrap."""
+    ge_b = 1 - less_than(u, BETA)
+    ge_b1 = 1 - less_than(u, BETA + 1)
+    le = less_than(u, 2 * GAMMA2 - BETA - 1)
+    return (ge_b - wrap * (ge_b - ge_b1)) * le
+
+
+# --- Keccak-f[1600] and SHAKE256 on arithmetic bits ---------------------------------
+
+ROUND_CONSTANTS = (
+    0x0000000000000001, 0x0000000000008082, 0x800000000000808A, 0x8000000080008000,
+    0x000000000000808B, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
+    0x000000000000008A, 0x0000000000000088, 0x0000000080008009, 0x000000008000000A,
+    0x000000008000808B, 0x800000000000008B, 0x8000000000008089, 0x8000000000008003,
+    0x8000000000008002, 0x8000000000000080, 0x000000000000800A, 0x800000008000000A,
+    0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
+)
+ROTATION_OFFSETS = (
+    (0, 36, 3, 41, 18),
+    (1, 44, 10, 45, 2),
+    (62, 6, 43, 15, 61),
+    (28, 55, 25, 21, 56),
+    (27, 20, 39, 8, 14),
+)
+RATE_BITS = 1088
+# KS independent Keccak states share one vector, interleaved: element z * KS + s holds
+# bit z of state s. Every Keccak operation is bitwise or a rotation, so it acts on all KS
+# states at once, in the rounds of one. KS = 1 is the single-state layout.
+KS = 1
+
+
+def interleave_states(vecs):
+    """Element i * len(vecs) + s of the result is element i of vecs[s]; len(vecs) a power of 2."""
+    if len(vecs) == 1:
+        return vecs[0]
+    assert len(vecs) & (len(vecs) - 1) == 0
+    return sint.zip(interleave_states(vecs[0::2]), interleave_states(vecs[1::2]))
+
+
+def lane(state, x, y):
+    return state.get_vector(64 * KS * (x + 5 * y), 64 * KS)
+
+
+def rotate(v, r):
+    """Lane rotated left by r: bit z of the result is bit z - r of v."""
+    r %= 64
+    if r == 0:
+        return v
+    return concat([v.get_vector((64 - r) * KS, r * KS), v.get_vector(0, (64 - r) * KS)])
+
+
+def parity_coefficients(top):
+    """Coefficients over Z_q of the polynomial of degree top that maps k to k mod 2 on 0 .. top."""
+    coeffs = [0] * (top + 1)
+    for i in range(top + 1):
+        basis, denom = [1], 1
+        for j in range(top + 1):
+            if j != i:
+                basis = [((basis[k - 1] if k else 0) - j * (basis[k] if k < len(basis) else 0)) % Q
+                         for k in range(len(basis) + 1)]
+                denom = denom * (i - j) % Q
+        scale = (i % 2) * pow(denom, Q - 2, Q)
+        coeffs = [(c + scale * b) % Q for c, b in zip(coeffs, basis)]
+    return coeffs
+
+
+PARITY11 = parity_coefficients(11)
+
+
+def parity11(t):
+    """k mod 2 for elements k in 0 .. 11: depth 4, six products (Paterson-Stockmeyer).
+
+    P = q0 + q1 t^4 + q2 t^8, where q_j holds the coefficients 4j .. 4j + 3 of P.
+    """
+    a = PARITY11
+    t2 = t * t
+    t3 = t2 * t
+    t4 = t2 * t2
+    t8 = t4 * t4
+    q = [a[4 * j] + a[4 * j + 1] * t + a[4 * j + 2] * t2 + a[4 * j + 3] * t3 for j in range(3)]
+    return q[0] + q[1] * t4 + q[2] * t8
+
+
+assert all(sum(c * k ** e for e, c in enumerate(PARITY11)) % Q == k % 2 for k in range(12))
+
+
+def theta_parity(state):
+    # Each bit becomes the parity of 11 bits. Their sum, in 0 .. 11, is local, and
+    # parity11 takes 4 multiplication rounds (6 products per bit).
+    rows = [state.get_vector(320 * KS * y, 320 * KS) for y in range(5)]
+    s = rows[0] + rows[1] + rows[2] + rows[3] + rows[4]  # column sums, 0 .. 5
+    lanes_s = [s.get_vector(64 * KS * x, 64 * KS) for x in range(5)]
+    left = concat([lanes_s[(x - 1) % 5] for x in range(5)])
+    right = concat([rotate(lanes_s[(x + 1) % 5], 1) for x in range(5)])
+    return parity11(state + concat([left + right] * 5))
+
+
+def theta_xor(state):
+    # Three levels of XOR for the column parities, then two more: 5 rounds, with
+    # 2 products per bit.
+    rows = [state.get_vector(320 * KS * y, 320 * KS) for y in range(5)]
+    c = xor(xor(rows[0], rows[1]), xor(rows[2], rows[3]))
+    c = xor(c, rows[4])
+    lanes_c = [c.get_vector(64 * KS * x, 64 * KS) for x in range(5)]
+    left = concat([lanes_c[(x - 1) % 5] for x in range(5)])
+    right = concat([rotate(lanes_c[(x + 1) % 5], 1) for x in range(5)])
+    d = xor(left, right)
+    return xor(state, concat([d] * 5))
+
+
+def keccak_round(state, rc):
+    state = theta_parity(state) if THETA == "parity" else theta_xor(state)
+    dest = {}
+    for x in range(5):
+        for y in range(5):
+            dest[(y, (2 * x + 3 * y) % 5)] = rotate(lane(state, x, y), ROTATION_OFFSETS[x][y])
+    b = [dest[(x, y)] for y in range(5) for x in range(5)]
+    b_all = concat(b)
+    b1 = concat([b[((x + 1) % 5) + 5 * y] for y in range(5) for x in range(5)])
+    b2 = concat([b[((x + 2) % 5) + 5 * y] for y in range(5) for x in range(5)])
+    state = xor(b_all, (1 - b1) * b2)
+    rc_bits = [(rc >> z) & 1 for z in range(64) for _ in range(KS)]
+    first = state.get_vector(0, 64 * KS)
+    k = const_vec(rc_bits)
+    first = first + k - 2 * first * k
+    return concat([first, state.get_vector(64 * KS, (1600 - 64) * KS)])
+
+
+def keccak_f(state):
+    for rc in ROUND_CONSTANTS:
+        state = keccak_round(state, rc)
+    return state
+
+
+def shake256_bits(pieces, total_bits, out_bits):
+    """SHAKE256 of a message given as pieces (sint bit vectors or public bit lists)."""
+    assert total_bits % 8 == 0
+    msg_bytes = total_bits // 8
+    padded_bytes = -(-(msg_bytes + 1) // 136) * 136
+    pad = [0] * ((padded_bytes - msg_bytes) * 8)
+    pad[0:8] = [(0x1F >> i) & 1 for i in range(8)]
+    pad[-1] ^= 1
+    pieces = list(pieces) + [pad]
+    flat = []  # list of (kind, value): ("s", sint vector) or ("p", list of bits), in elements
+    for piece in pieces:
+        flat.append(("p", [b for b in piece for _ in range(KS)]) if isinstance(piece, list)
+                    else ("s", piece))
+
+    def take(n):
+        taken, got = [], 0
+        while got < n:
+            kind, value = flat[0]
+            size = len(value)
+            need = n - got
+            if size <= need:
+                taken.append((kind, value))
+                flat.pop(0)
+                got += size
+            else:
+                if kind == "p":
+                    taken.append(("p", value[:need]))
+                    flat[0] = ("p", value[need:])
+                else:
+                    taken.append(("s", value.get_vector(0, need)))
+                    flat[0] = ("s", value.get_vector(need, size - need))
+                got += need
+        return taken
+
+    state = None
+    for block in range(padded_bytes // 136):
+        parts = take(RATE_BITS * KS)
+        if state is None:
+            vecs = [v if kind == "s" else const_vec(v) + sint(0, size=len(v))
+                    for kind, v in parts]
+            state = concat(vecs + [sint(0, size=(1600 - RATE_BITS) * KS)])
+        else:
+            out, off = [], 0
+            for kind, v in parts:
+                cur = state.get_vector(off, len(v))
+                if kind == "s":
+                    out.append(xor(cur, v))
+                else:
+                    kv = const_vec(v)
+                    out.append(cur + kv - 2 * cur * kv)
+                off += len(v)
+            state = concat(out + [state.get_vector(RATE_BITS * KS, (1600 - RATE_BITS) * KS)])
+        state = keccak_f(state)
+    assert out_bits <= RATE_BITS
+    return state.get_vector(0, out_bits * KS)
+
+# --- root-engine phases --------------------------------------------------------------
+
+def set_ks(n):
+    global KS
+    KS = n
+
+
+def read_public_vector(n):
+    arr = cint.Array(n)
+
+    @for_range(n)
+    def _(i):
+        arr[i] = public_input()
+
+    return arr.get_vector()
+
+
+def to_sint(public_vec):
+    return public_vec + sint(0, size=len(public_vec))
+
+
+def and_all(v):
+    """Product of a vector of bits, as a size-1 sint (a tree, ceil(log2 n) rounds)."""
+    size = len(v)
+    while size > 1:
+        half = size // 2
+        head = v.get_vector(0, half) * v.get_vector(half, half)
+        if size % 2:
+            head = concat([head, v.get_vector(2 * half, 1)])
+        v, size = head, len(head)
+    return v
+
+
+def part(bit_list, base, size):
+    return [bit.get_vector(base, size) for bit in bit_list]
+
+
+def mat_vec(a_vec, v_hat):
+    """A v for v in the NTT domain and A-hat a public (run-time) vector; result in the normal domain."""
+    prod = concat([v_hat] * K) * a_vec
+    rows = []
+    for r in range(K):
+        acc = prod.get_vector(N * (L * r), N)
+        for s in range(1, L):
+            acc = acc + prod.get_vector(N * (L * r + s), N)
+        rows.append(acc)
+    return intt(concat(rows), K)
+
+
+def repeat_interleaved(vec, times):
+    """Element i * times + s of the result is element i of vec."""
+    n = len(vec)
+    src = sint.Array(n)
+    src.assign(vec)
+    dst = sint.Array(n * times)
+
+    @for_range(n)
+    def _(i):
+        for s in range(times):
+            dst[i * times + s] = src[i]
+
+    return dst.get_vector()
+
+
+def context_agreed():
+    """Read every party's context digest, open them, and return the inputs' agreement bit.
+
+    The digests are public values (hashes of public data); a party that enters a different
+    one makes the attempt stop here.
+    """
+    digests = []
+    for p in range(PARTIES):
+        arr = cint.Array(DIGEST_BYTES)
+        arr.assign(sint.get_input_from(p, size=DIGEST_BYTES).reveal())
+        digests.append(arr)
+    mismatches = regint.Array(1)
+    mismatches[0] = 0
+    for p in range(1, PARTIES):
+        @for_range(DIGEST_BYTES)
+        def _(i):
+            @if_(digests[p][i] != digests[0][i])
+            def _():
+                mismatches[0] = mismatches[0] + 1
+    return mismatches[0] == 0
+
+
+def expand_mask(rho_pp, nonce_bits):
+    """FIPS 204 Algorithm 34 for gamma1 = 2^19 on secret bits of rho''.
+
+    The L SHAKE256 instances run side by side in one interleaved Keccak state. Instance s
+    absorbs rho'' || IntegerToBytes(kappa + s, 2) in one block and squeezes 640 bytes (five
+    blocks); coefficient i is gamma1 minus the 20 bits starting at bit 20 i.
+    """
+    set_ks(L)
+    secret = repeat_interleaved(rho_pp, L)
+    tail_bits = [0] * (1600 - 512)
+    for i in range(8):
+        tail_bits[16 + i] = (0x1F >> i) & 1  # domain separator byte after the 66 message bytes
+    tail_bits[RATE_BITS - 1 - 512] = 1       # final bit of the padding (0x80 in byte 135)
+    tail = cint.Array((1600 - 512) * L)
+    tail.assign([b for b in tail_bits for _ in range(L)])
+    nonces = cint.Array(16 * L)
+    nonces.assign(nonce_bits)
+    for s in range(L):
+        for b in range(16):
+            tail[b * L + s] = nonces[16 * s + b]
+    state = concat([secret, to_sint(tail.get_vector())])
+    blocks = []
+    for _ in range(5):
+        state = keccak_f(state)
+        blocks.append(state.get_vector(0, RATE_BITS * L))
+    set_ks(1)
+    stream = concat(blocks)  # element t * L + s is bit t of the output of instance s
+    polys = []
+    for s in range(L):
+        value = stream.get_vector(s, N, skip=20 * L)
+        for j in range(1, 20):
+            value = value + stream.get_vector(j * L + s, N, skip=20 * L) * (1 << j)
+        polys.append(GAMMA1 - value)
+    return concat(polys)
+
+
+def fault(code, party, text):
+    print_ln("fault %s %s " + text, code, party)
+
+
+if PHASE == "mask":
+    agreed = context_agreed()
+    k_sum = sint.get_input_from(0, size=32)
+    for p in range(1, PARTIES):
+        k_sum = k_sum + sint.get_input_from(p, size=32)
+    mu = read_public_vector(512)
+    nonce_bits = read_public_vector(16 * L)
+    a_vec = read_public_vector(K * L * N)
+
+    @if_e(agreed)
+    def _():
+        masks = random_masks(32 + K * N)
+        k_bits = bit_decompose(k_sum, masks, 0)  # 23 vectors of 32
+        k_ok = and_all(less_than(k_bits, 256)).reveal()
+
+        @if_e(k_ok)
+        def _():
+            # K as 256 bits: byte i bit b at 8 i + b
+            k_stream = interleave_states(k_bits[0:8])
+            mu_sint = to_sint(mu)
+            # rho'' = SHAKE256(K || 0^32 || mu, 64): one block
+            rho_pp = shake256_bits([k_stream, [0] * 256, mu_sint], 1024, 512)
+            y = expand_mask(rho_pp, nonce_bits)
+            w = mat_vec(a_vec, ntt(y, L))
+            r1_bits, _, _ = decompose_bits(bit_decompose(w, masks, 32), low=False)
+            # w1Encode: coefficient j of polynomial i gives bits 4 (256 i + j) .. + 3
+            w1_stream = sint.zip(sint.zip(r1_bits[0], r1_bits[2]), sint.zip(r1_bits[1], r1_bits[3]))
+            ctilde_bits = shake256_bits([mu_sint, w1_stream], 512 + 4 * K * N, 384)
+            sint.write_to_file(w, position=POS_W)
+            revealed = cint.Array(384)
+            revealed.assign(ctilde_bits.reveal())
+            for byte in range(48):
+                value = revealed[8 * byte]
+                for bit in range(1, 8):
+                    value = value + revealed[8 * byte + bit] * (1 << bit)
+                print_ln("ctilde_byte %s", value)
+            # a fresh additive sharing of y, one share to each party
+            share0 = sint.get_random(size=L * N)
+            share1 = sint.get_random(size=L * N)
+            share0.reveal_to(0).binary_output()
+            share1.reveal_to(1).binary_output()
+            (y - share0 - share1).reveal_to(2).binary_output()
+            print_ln("mask_ok")
+
+        @else_
+        def _():
+            fault(2, 0, "signing seed shares do not sum to bytes")
+
+    @else_
+    def _():
+        fault(3, 0, "parties disagree on session, attempt, mu or rho")
+
+    print_ln("mldsa65_root_mask_complete")
+
+else:
+    agreed = context_agreed()
+    z_in, r_in = [], []
+    for p in range(PARTIES):
+        z_in.append(sint.get_input_from(p, size=L * N))
+        r_in.append(sint.get_input_from(p, size=K * N))
+    a_vec = read_public_vector(K * L * N)
+    ct = [read_public_vector(K * N) for _ in range(PARTIES)]
+    ct0 = read_public_vector(K * N)
+    ct0_ok = public_input()
+
+    @if_e(agreed)
+    def _():
+        # Linear consistency of each party's response with its verification share:
+        # A z_p - r_p = c T_p. The difference is zero for an honest party.
+        residual = cint.Array(PARTIES * K * N)
+        residual.assign(concat([mat_vec(a_vec, ntt(z_in[p], L)) - r_in[p] - ct[p]
+                                for p in range(PARTIES)]).reveal())
+        culprit = regint.Array(1)
+        culprit[0] = 0
+        for p in reversed(range(PARTIES)):
+            @for_range(K * N)
+            def _(i):
+                @if_(residual[p * K * N + i] != 0)
+                def _():
+                    culprit[0] = p + 1
+
+        @if_e(culprit[0] == 0)
+        def _():
+            _, (w,) = sint.read_from_file(POS_W, size=K * N)
+            z = z_in[0] + z_in[1] + z_in[2]
+            r = r_in[0] + r_in[1] + r_in[2]
+            r2 = r + ct0  # h = MakeHint(-c t0, r + c t0)
+            checked = concat([r - w + BETA, z + (GAMMA1 - BETA - 1), r, r2])
+            masks = random_masks(len(checked) + 1)
+            bits = bit_decompose(checked, masks)
+            # ||r - w||_inf <= beta
+            near = less_than(part(bits, 0, K * N), 2 * BETA + 1)
+            # ||z||_inf < gamma1 - beta
+            z_ok = less_than(part(bits, K * N, L * N), 2 * (GAMMA1 - BETA) - 1)
+            # ||LowBits(r)||_inf < gamma2 - beta
+            r1, wrap, u = decompose_bits(part(bits, (K + L) * N, K * N))
+            lo_ok = low_bits_ok(u, wrap)
+            # hint and its weight
+            r1_2, _, _ = decompose_bits(part(bits, (2 * K + L) * N, K * N), low=False)
+            d = [xor(a, b) for a, b in zip(r1, r1_2)]
+            h = 1 - (1 - d[0]) * (1 - d[1]) * (1 - d[2]) * (1 - d[3])
+            weight = vec_sum(h)
+            weight_ok = less_than(bit_decompose(weight, masks, len(checked)), OMEGA + 1)
+            accept_bit = and_all(concat([z_ok, lo_ok])) * weight_ok * ct0_ok
+            consistent = and_all(near).reveal()
+
+            @if_e(consistent)
+            def _():
+                accept = accept_bit.reveal()
+
+                @if_e(accept)
+                def _():
+                    print_ln("accept")
+                    print_ln("h %s", h.reveal())
+                    for p in range(PARTIES):
+                        print_ln("z%s %s", p + 1, z_in[p].reveal())
+
+                @else_
+                def _():
+                    print_ln("reject")
+
+            @else_
+            def _():
+                fault(2, 0, "response does not match the committed mask")
+
+        @else_
+        def _():
+            fault(1, culprit[0], "bad response")
+
+    @else_
+    def _():
+        fault(3, 0, "parties disagree on session, challenge, t0 or verification shares")
+
+    print_ln("mldsa65_root_response_complete")
