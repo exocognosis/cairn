@@ -86,7 +86,6 @@ by doing the work.
 
 ## Smaller items
 
-- A license. The repository grants none today, which blocks outside use and contribution.
 - Hedged signing (random `rnd`) in addition to the deterministic variant.
 - Constant-time arithmetic in the Rust FIPS 204 code.
 - Certificate rotation and revocation for node TLS.

@@ -21,6 +21,7 @@ authors:
     affiliation: Dytallix
 repository-code: "https://github.com/exocognosis/cairn"
 url: "https://github.com/exocognosis/cairn"
+license: MIT
 version: 0.2.0-research-preview
 date-released: "2026-11-24"
 keywords:

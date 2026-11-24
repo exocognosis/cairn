@@ -2,8 +2,7 @@
 
 cairn is research code. Corrections, measurements and reviews are as useful as features.
 
-Note first: the repository currently grants no license. Until one is chosen, please open an
-issue before investing time in a change.
+The code is MIT licensed, and contributions are accepted under the same license.
 
 ## Getting set up
 

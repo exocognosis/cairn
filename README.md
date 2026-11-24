@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/exocognosis/cairn/actions/workflows/ci.yml/badge.svg)](https://github.com/exocognosis/cairn/actions/workflows/ci.yml)
 ![Status: research preview](https://img.shields.io/badge/status-research%20preview-orange)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![FIPS 204 ML-DSA-65](https://img.shields.io/badge/FIPS%20204-ML--DSA--65-blue)
 
 **A quorum of validators signs a blockchain checkpoint with one ordinary post-quantum
@@ -408,5 +409,5 @@ the live sidecar tests print `SKIPPED`; everything else runs.
 
 ## License
 
-No license has been chosen yet, so no rights are granted: you may read the code, but not
-use, modify or redistribute it. Choosing a license is on the [roadmap](ROADMAP.md).
+[MIT](LICENSE). It is research code with no warranty: read [Status and limits](#status-and-limits)
+before relying on it for anything.

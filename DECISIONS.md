@@ -135,7 +135,7 @@ statistical machinery misleading about a system whose real cost is the MPC.
 
 ## Repository
 
-**D-28. Name `cairn`, private, no license granted.** `exocognosis/cairn` was free. No license
+**D-28. Name `cairn`, private, no license granted (superseded by D-66).** `exocognosis/cairn` was free. No license
 file is added; the owner should choose one.
 
 **D-29. Repository location.** Created at `~/Developer/cairn`, next to the projects it builds
@@ -328,3 +328,11 @@ had no capacity and `cpx41` is not sold in the EU sites.
 reference backend is session setup payload (share-check values, opened `z`). Caching engine
 shares across checkpoints or compressing those payloads would cut it; neither is done, because
 with a real MPC backend the attempts dominate anyway.
+
+# v2.3: public release
+
+**D-66. Public, MIT.** On 2026-11-24 the owner made the repository public and chose the MIT
+license, matching lattice-aggregation. Before publishing, the tree and history were scanned
+for keys, tokens, addresses and local paths (none found), and links to the related projects
+that are not public were reworded. MIT carries no patent grant; Apache-2.0 was the
+alternative considered.

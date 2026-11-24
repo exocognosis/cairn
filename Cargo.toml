@@ -10,6 +10,7 @@ publish = false
 repository = "https://github.com/exocognosis/cairn"
 homepage = "https://github.com/exocognosis/cairn"
 authors = ["Rick Glenn"]
+license = "MIT"
 keywords = ["post-quantum", "ml-dsa", "threshold", "mpc", "fips204"]
 categories = ["cryptography"]
 readme = "README.md"

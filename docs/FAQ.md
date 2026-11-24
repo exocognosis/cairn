@@ -64,7 +64,7 @@ The combinatorial bounds for nested threshold committees come from a separate Le
 checks the bounds it uses against brute force for the default tower.
 
 **Can I use or modify the code?**
-Not yet in a legal sense: the repository carries no license. Choosing one is on the roadmap.
+Yes. It is MIT licensed. It is also unreviewed research code with no warranty.
 
 **How do I report a security problem?**
 See [SECURITY.md](../SECURITY.md).
