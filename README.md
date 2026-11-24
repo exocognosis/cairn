@@ -373,7 +373,8 @@ The next milestones, in order, each with an acceptance test in [ROADMAP.md](ROAD
 
 This is independent research. If your organisation funds post-quantum infrastructure, runs
 validators, or wants a pilot, [ROADMAP.md](ROADMAP.md) lists what each milestone needs and
-delivers. To get in touch, open an issue on this repository.
+delivers. To get in touch, write to
+<rick@dytallix.com> or open an issue on this repository.
 
 ## Repository layout
 

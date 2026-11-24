@@ -101,4 +101,4 @@ by doing the work.
 | An audit budget | M6 |
 | Validator operators willing to run nodes | M7 |
 
-To discuss any of these, open an issue on the repository.
+To discuss any of these, write to <rick@dytallix.com> or open an issue on the repository.

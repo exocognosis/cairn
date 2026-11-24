@@ -17,8 +17,7 @@ Report anything that contradicts what the documentation claims, for example:
 - a way for fewer than four signers to block signing.
 
 Use GitHub's private vulnerability reporting on this repository (Security tab, "Report a
-vulnerability"). If that is not available to you, open an issue that says only that you have a
-security report, without details, and you will be contacted.
+vulnerability"), or write to <rick@dytallix.com>. Please do not put details in a public issue.
 
 Please include the commit, the commands you ran and what you observed.
 

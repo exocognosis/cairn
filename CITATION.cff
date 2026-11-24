@@ -19,6 +19,7 @@ authors:
   - family-names: Glenn
     given-names: Rick
     affiliation: Dytallix
+    email: rick@dytallix.com
 repository-code: "https://github.com/exocognosis/cairn"
 url: "https://github.com/exocognosis/cairn"
 license: MIT
