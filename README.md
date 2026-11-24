@@ -406,4 +406,5 @@ prototype and its MP-SPDZ programs) and integrates with
 
 ## License
 
-Private repository. No license is granted.
+No license has been chosen yet, so no rights are granted: you may read the code, but not
+use, modify or redistribute it. Choosing a license is on the [roadmap](ROADMAP.md).
