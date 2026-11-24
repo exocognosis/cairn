@@ -22,7 +22,7 @@ deviation is detectable but not attributable (D-12).
 
 **D-03. Root parties are leaf committees, modelled, not realized.** Only the root tier runs the
 engine, among at most six parties; each party is a leaf committee. How a leaf jointly plays an
-MPC party is unsolved (ARCHITECTURE.md §10.2). The alternative, one delegate per leaf holding
+MPC party is unsolved (ARCHITECTURE.md §11.2). The alternative, one delegate per leaf holding
 the leaf's share, was rejected: three corrupt delegates would hold the key, collapsing the
 tower's bound from 9 to 3.
 
@@ -140,3 +140,139 @@ file is added; the owner should choose one.
 
 **D-29. Repository location.** Created at `~/Developer/cairn`, next to the projects it builds
 on. Nothing was written to those checkouts: pqc-sidecar is built into cairn's `target/`.
+
+# v2: distributed execution
+
+The v2 brief asked for TCP networking, a live pqc-sidecar `Sign` run, leaf-to-root share
+compression and an MP-SPDZ bridge, again without questions. Choices and their costs:
+
+## Topology and trust
+
+**D-30. Root engines are separate nodes, and that changes the trust model.** The brief asks for
+the nine active signers to be compressed into a 3-party additive sharing held by three root MPC
+engines "while preserving the 9 of 16 to forge / 4 of 16 to block bounds". The compression is
+implemented exactly as specified, but the claim does not hold as stated and the documentation
+says so: for the length of a session the key is shared among three engines, so session-time
+secrecy is the root MPC's threshold (two colluding engines under an honest-majority protocol),
+not 9 of 16. The tower bounds still describe the long-term shares, who must cooperate to start a
+session, and who can block. Preserving them during signing needs leaves to jointly play root
+parties, which stays open (ARCHITECTURE.md §11.2).
+
+**D-31. Four root engines, three active.** A three-party honest-majority MPC has no spare. A
+fourth engine node lets the coordinator replace one faulty or offline engine; two bad engines
+stop signing.
+
+**D-32. 21 processes, not 16.** "16 OS processes" is the 16 signers. Root engines and the MPC
+backend are separate processes too (4 + 1 with the reference worker), plus `serve-kms`.
+
+**D-33. `serve-kms` is the coordinator.** The process that receives pqc-sidecar's `Sign` drives
+the session. It holds no secret and never receives share material (checked on real frames in
+`cairn-net/tests/cluster.rs`). It is trusted for liveness and for honest fault reports.
+
+**D-34. Signers do no per-attempt work.** After compression the engines hold additive shares, so
+they do the linear response step and only the two MPC phases repeat on rejection. This removes
+nine signers from the rejection loop (their traffic no longer grows with attempts) and makes the
+v1 commitment/opening rounds unnecessary on this path: the MPC binds the response by taking it
+as input, and opens `z_k` itself on accept.
+
+**D-35. The in-process protocol stays.** `threshold-mldsa` and `cascade-tower` keep their
+state machines and all 32 v1 tests; they are the simulation harness and document the round
+structure. The networked path is a second implementation in `cairn-net`, not a port, because a
+synchronous call tree does not become a networked protocol by swapping a channel type.
+
+## Transport
+
+**D-36. One connection per exchange, request/reply.** Simple, no connection state to repair
+after a fault, and a deadline per exchange maps one-to-one onto a fault against one peer. The
+cost is a TCP handshake per exchange, which matters on a real WAN and is not modelled by the
+injected latency.
+
+**D-37. Plain TCP.** No TLS in v2: mutual authentication needs a PKI decision (node certificates,
+rotation) that belongs with the deployment. The README, the transport module and DEPLOY_SPLIT.md
+all say the links must be loopback or an encrypted tunnel. This is the largest practical gap.
+
+**D-38. Deadlines are real.** `tokio::time::timeout` around every exchange; a stalled peer costs
+the wall-clock round timeout once and is then excluded. Tests assert elapsed time.
+
+**D-39. Address books are static files.** Each node reads `peers.json`; a signer sends
+sub-shares only to engine addresses from its own file, never to addresses supplied by the
+coordinator.
+
+**D-40. Nodes sign checkpoint messages only.** Signers and engines refuse a message that does
+not start with pqc-sidecar's `"pqc-sidecar/checkpoint/v2"` domain. A compressed sharing is
+message-independent, so this is the engines' check that matters; it stops the KMS endpoint from
+being a general signing oracle.
+
+## Share compression
+
+**D-41. Fresh sub-sharing per session.** Signers re-deal on every session and after every
+re-formation. Caching the engines' shares across checkpoints would save one round and 0.3 MB,
+at the price of long-lived key shares on the engines.
+
+**D-42. Share check by linear images.** Engines publish `A·a1 + a2` per sub-share; sums are
+checked against the signers' public verification shares. This names a signer that deals a wrong
+share without revealing anything (each value is uniform, the sum is public). It cannot tell a
+lying engine from a lying signer.
+
+**D-43. No check on seed sub-shares.** A hash commitment cannot be checked through an additive
+split. A wrong `K` sub-share makes the backend's range test fail (unattributed) or changes the
+mask to another valid one; it cannot bias the mask without knowing `K`.
+
+## MPC bridge
+
+**D-44. The bridge protocol is the engine's two phases, per party.** `MASK` and `RESPONSE`
+mirror `AttemptEngine::mask_phase` and `response_phase`, with each party sending its additive
+share. The same frames serve the root engine nodes and `IpcEngine`.
+
+**D-45. `IpcEngine` re-shares.** To sit behind the existing trait, which hands the engine
+per-signer sealed inputs, the adapter does the public linear checks, sums, and re-shares three
+ways (including fresh verification shares `T_k`). It adds no security; it lets the in-process
+tower exercise the IPC path and any backend behind it.
+
+**D-46. Reference worker: one process, three sockets, clear text.** The brief asks for a
+deterministic external-process worker so `cargo test` covers the IPC round trip and rejection
+loop without MP-SPDZ. It is exactly that and is labelled as not being an MPC everywhere it
+appears. Its mask split is derived from the seed, so equal inputs give equal outputs.
+
+**D-47. Replicated field, not replicated ring.** The brief names `replicated-ring-party.x`.
+That protocol computes over `Z_2^k`; the shares and all arithmetic here are modulo
+`q = 8380417`, so the MP-SPDZ target is `replicated-field-party.x -P 8380417` (or
+`malicious-rep-field-party.x`).
+
+**D-48. Unattributed faults rotate engines.** With one spare this resolves one bad engine.
+
+## Sidecar integration
+
+**D-49. `RAW`, not `EXTERNAL_MU`.** The brief mentions `EXTERNAL_MU`; the stock pqc-sidecar at
+`c861717` signs with `MessageType = RAW`, so that is what the endpoint implements and what the
+live test exercises.
+
+**D-50. A CometBFT RPC stand-in for the live test.** pqc-sidecar needs a chain to follow.
+`cairn mock-chain` answers the three JSON-RPC methods the `cometbft` adapter calls, with
+`verify = "trust_node"`. It makes the live `Sign` test self-contained; it says nothing about
+consensus verification, which is pqc-sidecar's and unchanged.
+
+**D-51. `kms::serve` takes a `KmsSigner`.** The endpoint is generic over the in-process tower
+and the TCP cluster; the cluster signer owns a small tokio runtime behind the blocking handler.
+
+## Benchmarks and docs
+
+**D-52. One-offline means stalled.** A dead process is refused immediately and costs nothing,
+which would make the row uninformative. The benchmark uses a peer that accepts and never
+answers, and reinstates it before every certificate, so the row shows the worst case.
+
+**D-53. WAN latency is injected, not measured.** `--link-delay-ms` sleeps before every send on
+every node; nothing here ran across two hosts. DEPLOY_SPLIT.md gives the commands; they are the
+same binaries and flags the local scripts run, and have not been executed on a split pair.
+
+**D-54. The KMS endpoint answers retries from finished signatures.** pqc-sidecar's KMS client
+abandons a `Sign` call after 5 s and retries. With MP-SPDZ a signature takes longer, so without
+this every retry would start a new session and none would finish in time. The endpoint keeps the
+last 256 signatures by message digest. Deterministic signing makes this exact: the cached bytes
+are what a new session would produce.
+
+**D-55. The MP-SPDZ program was written and run by a delegated agent, then re-checked.** Its
+circuit, bridge and README are under `mpc/mp-spdz/`. Independently of its report, the
+`mpc-bridge` tests and the live sidecar flow were re-run here against its bridges with
+`replicated-field-party.x` and passed. Its per-phase timings are quoted from its README and were
+not re-measured, apart from the phase times its bridge logged during those runs (consistent).

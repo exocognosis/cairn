@@ -1,6 +1,8 @@
 # Architecture
 
-This document specifies the cairn v1 signing protocol: keys, the MPC boundary, the per-attempt
+This document specifies the cairn signing protocol. Sections 1 to 9 cover the in-process
+protocol of v1; section 10 covers distributed execution (v2); section 11 lists what is open.
+Section 1 onward: keys, the MPC boundary, the per-attempt
 state machine at both tiers, retry synchronization, fault handling, and the path to a `.pqcc`
 certificate. Section numbers of FIPS 204 algorithms are given where the code follows them.
 
@@ -202,19 +204,162 @@ are cited by theorem name and not copied. `cascade-tower` evaluates their statem
 the two extremal bounds by brute force for the default shape; nothing in this repository is
 itself machine-checked.
 
-## 10. What v1 does not solve
+## 10. Distributed execution (v2)
 
-1. **A real engine.** Replace `TrustedEngine` with an MPC among the root parties. The interface
-   matches the existing MP-SPDZ program, which samples its mask inside the MPC; the exact
-   `ExpandMask` variant in MPC is the part measured to hit the wall at N = 6.
-2. **Virtual root parties.** A root-MPC party is a leaf committee. Each leaf must jointly play
-   that party (an MPC emulating an MPC party, or a protocol-specific conversion of the leaf's
-   Shamir sharing into root-MPC inputs). v1 models the hand-off with `Sealed` values; no such
-   protocol is implemented, and its cost is unknown.
+Sections 1 to 9 describe the in-process protocol (`threshold-mldsa`, `cascade-tower`), which is
+kept as the simulation harness and as the reference for the round structure. v2 adds a second
+execution path in which every party is its own OS process (`cairn-net`, `mpc-bridge`).
+
+### 10.1 Nodes and transport
+
+| Node | Identity | Holds | Process |
+|---|---|---|---|
+| Signer | `leaf_i/signer_j` | one nested Shamir share (`.share` file) | `cairn node --role signer` |
+| Root engine | `root_k` | per session: an additive share of the key | `cairn node --role root` |
+| MPC party | slot 1..3 | whatever the MPC protocol gives it | backend process, reached over a Unix socket |
+| Coordinator | `coordinator` | nothing secret | `cairn serve-kms --peers ...` |
+
+Transport (`cairn-net::transport`): one TCP connection per exchange, one request frame, one
+reply frame. A frame is a big-endian `u32` length and a `bincode`-encoded
+`Frame {version, from, to, session, body}`. Every exchange runs under `tokio::time::timeout`;
+a missed deadline is a `Timeout` fault against that peer. `--link-delay-ms` sleeps before each
+send to emulate WAN latency. There is no encryption or authentication (§11.4).
+
+### 10.2 Share compression
+
+For active set `S` (three leaves, three signers each) with root coefficients `Λ_i` and leaf
+coefficients `λ_j^(i)`:
+
+```
+signer (i,j):   ŝ(i,j) = Λ_i · λ_j^(i) · share(i,j)            (KeyShare::flatten)
+                ŝ(i,j) = a_1 + a_2 + a_3,  a_k uniform          (AdditiveShare::split)
+                send a_k to root engine k                       (Body::SubShare, point to point)
+engine k:       s_k = Σ_(i,j) a_k(i,j)                          (AdditiveShare::sum)
+                Σ_k s_k = Σ_(i,j) ŝ(i,j) = s  (mod q)
+```
+
+This applies to `s1`, `s2` and the 32 field elements of `K` alike. The leaf's share of the key,
+`s~(i) = Σ_j λ_j share(i,j)`, would be a sum over a leaf's signers; no node computes that sum.
+
+**Share check.** Engine `k` publishes `V_k(i,j) = A·a1_k(i,j) + a2_k(i,j)`. Each is uniform; their
+sum over `k` is fixed by public data: `Σ_k V_k(i,j) = Λ_i λ_j · T(i,j)` with `T(i,j)` the
+signer's dealt verification share. The coordinator checks this per signer
+(`flatten::sub_shares_consistent`) and derives each engine's verification share
+`T_k = Σ_(i,j) V_k(i,j)`. The seed `K` has no such check: a wrong `K` sub-share either fails the
+backend's byte-range test (unattributed) or yields a different but valid mask.
+
+### 10.3 Session
+
+```
+coordinator                 signers (16)                root engines (4)            MPC backend
+   │── Prepare{message} ──────▶│ ─────────────────────────▶│
+   │◀──────── Ready ───────────│◀──────────────────────────│      round 1: commitment
+   │   choose 3 leaves × 3 signers, 3 engines
+   │── Deal{active, roots} ───▶│── SubShare ─────────────▶│      point to point
+   │◀──────── Dealt ───────────│◀─────── Ack ─────────────│
+   │── Collect{active} ───────────────────────────────────▶│
+   │◀──────── ShareCheck{V} ───────────────────────────────│      per-signer check
+   │── Install{slot, T_1..3} ─────────────────────────────▶│
+   │── Mask{attempt} ─────────────────────────────────────▶│── MASK ──────▶│
+   │◀──────── Challenge{c~} ───────────────────────────────│◀─ c~, y_k ────│  round 2: challenge
+   │── Finish ────────────────────────────────────────────▶│── RESPONSE ──▶│
+   │◀──────── Verdict ─────────────────────────────────────│◀─ verdict ────│  rounds 3, 4
+   │   reject: attempt += 1, back to Mask.   accept: assemble, verify, Abort (erase)
+```
+
+The coordinator needs the three engines to agree on `c~` and on the verdict; a lone dissenter is
+named (`Equivocation`). On accept the backend opens the hint and each engine's `z_k`; the
+coordinator sums them, encodes the signature and verifies it with RustCrypto `ml-dsa`.
+
+Signers do nothing per attempt: a rejection repeats only `Mask` and `Finish`. The four rounds of
+§3 map onto this as: commitment = `Prepare`/`Ready`; challenge = `Mask`; masked response and
+hint/carry = `Finish` (the linear response is computed by the engine and bound by handing it to
+the MPC, which also does the carry and hint aggregation).
+
+### 10.4 Faults over the network
+
+| Fault | Detected | Named | Effect |
+|---|---|---|---|
+| Node down | connection refused | node | skipped at once |
+| Node stalled | wall-clock deadline | node | skipped after one deadline, excluded |
+| Refuses the message | `Refused` reply | node | skipped |
+| Wrong sub-shares | share check | signer | excluded, session re-formed |
+| Sub-share not delivered | `DealFailed` / `missing` | engine / signer | excluded, re-formed |
+| Engine reports another `c~` or verdict | 2-of-3 comparison | engine | replaced by the spare |
+| Engine's `(z_k, r_k)` inconsistent | backend check `A z_k − r_k = c T_k` | engine (by slot) | replaced by the spare |
+| Engine used another mask share | backend check `‖r − w‖∞ ≤ β` | none | engines rotated out in turn |
+
+Exclusions persist across signatures and are cleared every `reinstate_every` signatures. A
+re-formed session keeps the attempt counter, so `kappa`, the mask, `c~` and `z` are unchanged
+and the result is still the deterministic signature. Each session uses a fresh random session
+id and a fresh sub-sharing.
+
+### 10.5 MPC bridge
+
+`mpc-bridge::ipc` defines the party protocol: one Unix socket per party, frames of a big-endian
+`u32` length plus a tagged payload, little-endian field elements.
+
+| Tag | Message | Meaning |
+|---|---|---|
+| `0x01` | `MASK` | party's share of `K`, with `mu`, `rho`, attempt → `0x81 MASK_OK` (`c~`, party's share of `y`) |
+| `0x02` | `RESPONSE` | party's `z_k`, `r_k`, with `t0`, `T_1..3` → `0x82 REJECT` or `0x83 ACCEPT` (hint, `z_1..3`) |
+| `0x03` | `CLOSE` | drop the session → `0x84 CLOSED` |
+| `0x8F` | `FAULT` | code 1 blames a party, 2 is unattributed, 3 is a protocol error |
+
+What the backend computes is exactly the non-linear functionality of §2, for three parties:
+`K = Σ k_k`; `y = ExpandMask(H(K ‖ 0³² ‖ mu), 5·attempt)`; `w = A·y`;
+`c~ = H(mu ‖ w1Encode(HighBits(w)))`; then the per-party check, the mask check, the four abort
+conditions and `MakeHint`. It opens `c~`; on accept the hint and `z_1..3`; on reject one bit.
+
+Two users of the bridge:
+
+- A root engine node holds one party socket and one share (`PartyClient`).
+- `IpcEngine` implements `AttemptEngine` for the in-process tower by re-sharing the sealed sums
+  three ways and driving all three sockets. It exists so the v1 state machines can run against
+  any backend that speaks the protocol.
+
+Two backends:
+
+- `cairn mpc-worker` / `cairn-mpc-worker`: the reference worker. One process, three sockets,
+  computes in the clear, deterministic. **Not a secure computation.**
+- `mpc/mp-spdz/`: an MP-SPDZ program and a per-party bridge for a three-party honest-majority
+  protocol over the field `Z_q` (`replicated-field-party.x -P 8380417`, or
+  `malicious-rep-field-party.x` at reduced security). `replicated-ring-party.x` computes over
+  `Z_2^k` and does not fit arithmetic modulo `q`. Verified on one machine against the reference
+  and in the live sidecar flow; see that directory's README for the exact status.
+
+### 10.6 Trust during signing
+
+| Party | Sees | Can it learn the key alone? |
+|---|---|---|
+| Coordinator | message, public check values, `c~`, verdicts, accepted `z` and hint | no |
+| One signer | its own share | no |
+| One root engine | one uniform sub-share per signer; its sum `s_k`; its mask share | no |
+| Two root engines | two of three additive shares | not from the sharing; **yes** inside an honest-majority 3-party MPC, where any two parties hold everything |
+| Three root engines | all three shares | yes |
+| The reference worker process | everything | yes (it is not an MPC) |
+| A network observer | all frames, including sub-shares | yes: the transport is plain TCP |
+
+So v2 moves the session-time trust from "nine signers in the right places" to "the root MPC's
+corruption threshold among the engines". The tower still governs the shares at rest, who must
+cooperate to start a session, and who can block one.
+
+## 11. What is not solved
+
+1. **A malicious-secure MPC backend.** The MP-SPDZ program runs and matches the reference with
+   the semi-honest `replicated-field-party.x` on one machine. Stock `malicious-rep-field-party.x`
+   refuses a 23-bit field at 40-bit statistical security, so active security needs an
+   extension-field check. The program also opens a few values beyond the functionality of §2
+   (listed in `mpc/mp-spdz/README.md`); that list has had no review. Multi-host runs are untested.
+2. **Leaf committees as root parties.** With separate root engines the session-time trust set
+   is the engines (§10.6). Keeping the 9-of-16 bound while signing needs each leaf to jointly
+   play its root party (an MPC emulating an MPC party, or root engines that are themselves
+   threshold-controlled by a leaf). No such protocol is implemented, and its cost is unknown.
 3. **Dealerless key generation and share refresh** across the tower.
-4. **Transport.** mTLS framing, real timers, and authenticated senders (the `sender` field is
-   trusted in the in-memory channel).
-5. **Proof.** No security argument for the composed protocol; the `(z_p, r_p)` and mask checks
-   are engineering measures whose interaction with a malicious-secure engine is unanalysed.
+4. **Transport security.** No encryption, no peer authentication, `from` is a claim. mTLS with
+   node certificates is the natural fix; until then, loopback or a tunnel.
+5. **Proof.** No security argument for the composed protocol.
 6. **Side channels.** The arithmetic is not constant time.
-7. **Hedged signing.** Only the deterministic variant (`rnd = 0³²`) is implemented.
+7. **Hedged signing.** Only the deterministic variant (`rnd = 0³²`).
+8. **Robustness of the root MPC.** A three-party honest-majority protocol aborts if a party
+   deviates; cairn then replaces an engine with the spare, and has only one spare.
