@@ -1,0 +1,142 @@
+# Decisions
+
+Every engineering choice made autonomously while building cairn v1, with the reason. The brief
+asked for no clarifying questions; where it was ambiguous or asked for something that cannot be
+built honestly in one pass, the choice and its cost are recorded here.
+
+## Scope and honesty
+
+**D-01. The non-linear computation is an interface with an ideal-functionality stand-in.**
+The brief asks for a threshold protocol with exact `ExpandMask`. That needs SHAKE256, rounding
+and comparisons evaluated on secret shares, which is the multi-gigabyte MPC the predecessor ran
+in MP-SPDZ. Writing a malicious-secure MPC in Rust was not feasible here, and a hand-rolled one
+would be worse than none. v1 therefore defines the boundary precisely (`AttemptEngine`, two
+phases, fixed openings, `Sealed` inputs) and ships `TrustedEngine`, which computes in the clear.
+Everything outside the boundary is real. The README says plainly that this is not threshold
+custody.
+
+**D-02. Linear work is pulled out of the engine.** Signers compute `z_p` and `r_p` locally and
+open `z_p` themselves. This is real share arithmetic, shrinks what an MPC must do, and gives the
+engine a per-signer check (`A·z_p − r_p = c·w_p·T_p`) for attribution. Cost: mask-share
+deviation is detectable but not attributable (D-12).
+
+**D-03. Root parties are leaf committees, modelled, not realized.** Only the root tier runs the
+engine, among at most six parties; each party is a leaf committee. How a leaf jointly plays an
+MPC party is unsolved (ARCHITECTURE.md §10.2). The alternative, one delegate per leaf holding
+the leaf's share, was rejected: three corrupt delegates would hold the key, collapsing the
+tower's bound from 9 to 3.
+
+**D-04. Trusted dealer.** Keys come from `KeyGen_internal` on a seed, then nested Shamir. This
+makes the public key and signatures comparable byte-for-byte with a reference signer, which is
+the strongest available correctness test. Dealerless generation is future work.
+
+**D-05. All signers in one process, in-memory channel, logical timeouts.** The protocol logic,
+codec and fault handling are exercised; sockets are not. A timeout is a counted event that adds
+the configured round timeout to a logical clock. pqc-sidecar-threshold's mTLS transport is the
+natural thing to put underneath later.
+
+## Cryptography
+
+**D-06. Clean reimplementation of FIPS 204 internals instead of porting.** The prototype's
+`fips_sign.rs` is 3,000+ lines entangled with research scaffolding. `fips204.rs` is about 500
+lines written from the standard and validated against RustCrypto `ml-dsa`: identical public keys
+and identical deterministic signatures. Plain `i64` modular arithmetic, not constant time.
+
+**D-07. Deterministic signing only (`rnd = 0³²`).** It is a FIPS 204 variant, needs no joint
+randomness, makes output byte-comparable with a reference, and makes repeating a `kappa` after a
+fault safe (same mask, same challenge, same `z`). Hedged signing needs a commit-reveal for `rnd`
+and is left out.
+
+**D-08. `kappa` advances only on rejection.** Fault retries reuse `kappa`, so the signature
+equals the single-signer one regardless of faults. Session ids still change (they include the
+retry counter), so messages cannot be replayed across retries.
+
+**D-09. Shamir over `Z_q` for everything, including `K`.** The 32 seed bytes are shared as
+field elements; the engine reconstructs and range-checks them. One sharing scheme, one Lagrange
+routine, and nesting is just composition of weights.
+
+**D-10. `t0` is public.** As in the ML-DSA analysis and the predecessor. The engine computes
+`c·t0` from public data.
+
+**D-11. Per-signer verification shares `T_p = A·s1_p + s2_p` are published.** They are Shamir
+shares of the public `t`, so they add nothing an adversary cannot derive, and they make
+inconsistent responses attributable. Seed shares get a hash commitment instead.
+
+**D-12. Unattributed faults are handled by rotation.** Attributing a mask-share deviation would
+need a verification share of `s1_p` alone (`A·s1_p`, 6 equations in 5 unknowns), which reveals
+`s1_p`. Instead the engine detects the inconsistency before any verdict and the coordinator
+suspends one spare-covered candidate per retry.
+
+**D-13. One verdict for all four abort conditions.** The engine does not report which bound
+failed, so retries leak one bit per attempt.
+
+## Protocol
+
+**D-14. Four rounds, named as in the brief.** `Commitment` fixes the signing set (it is a
+participation binding, not a commitment to `w`: opening per-signer `w_p` would reveal `c·s2`).
+`Challenge` is an echo of `c~`. `MaskedResponse` is a hiding commitment to `z_p`.
+`HintCarry` carries the verdict, the openings and the hint.
+
+**D-15. Exactly `t` active members per committee, lowest index first.** Fewer messages and
+fewer parties exposed to mid-attempt faults; the spare enters only after an exclusion.
+
+**D-16. Silence at round 1 is absorbed, not aborted.** The committee simply forms its set from
+the members that answered and stops waiting for the silent one for the rest of the session.
+
+**D-17. Exclusions persist until `reinstate`.** The certifier reinstates every 16 signatures by
+default. Persisting avoids paying a known-offline signer's timeout at every checkpoint.
+
+**D-18. `Committee` is a `Party`.** One state machine serves both tiers and would serve a
+deeper tower. v1 builds two tiers only (`Tower`), because that is what is tested.
+
+**D-19. `N ≤ 6` is enforced in constructors** (`Gadget::new`, hence `Committee::new`,
+`TowerParams::new`, `deal`), so an oversized committee cannot be built.
+
+**D-20. `bincode` for the wire format.** Compact and deterministic for these types. Not a
+stable cross-version format; the header carries a version byte.
+
+## Tower
+
+**D-21. Bounds are cited from Lean and evaluated, not re-proved.** The `CertTowers` sources are
+in a private tree marked not for publication, so they are referenced by theorem name only and
+not copied into this repository. The brief describes the Lean model as "cascade domination";
+the theorems that bound corruption for composed committees are its threshold-tree results
+(`minAuth_isLeast`, `minBlock_isLeast`, `rootProb_*`), so those parameterize the tower.
+
+**D-22. One seat per validator, stake-weighted draw, snake placement.** The Lean quorum file
+also models proportional seat apportionment; with 16 seats that gives most validators zero
+seats and lets one validator sit in several seats of a leaf. Sampling distinct validators keeps
+"signers" and "validators" the same thing for the bounds. Requires at least 16 staked
+validators.
+
+## Sidecar integration
+
+**D-23. No dependency on pqc-sidecar's code.** It is a binary crate under a different license.
+The `.pqcc` v2 encoding is implemented from `FORMAT.md` and checked against the real verifiers
+in the end-to-end test.
+
+**D-24. KMS-compatible endpoint as the adapter.** pqc-sidecar already supports an external
+signer through its `aws_kms` backend with an endpoint override. Speaking that protocol
+integrates the tower with zero changes to the sidecar. The endpoint ignores request signatures
+and must be bound to a private interface.
+
+**D-25. "pqc-sidecar-verify" is taken to mean both verifiers.** The test runs the sidecar's own
+`verify` subcommand (built from the local checkout, unmodified, at commit `c861717`) and the
+published npm package `@exocognosis/pqc-sidecar-verify` 0.2.0, plus RustCrypto `ml-dsa`.
+External verifiers are located through `scripts/setup-verifiers.sh`; when absent the test prints
+`SKIPPED` unless `CAIRN_REQUIRE_EXTERNAL_VERIFIERS=1`.
+
+**D-26. Certificates only at checkpoint heights.** `TowerCertifier::certify` refuses other
+heights. On the KMS path the sidecar's `checkpoint.interval` sets the cadence.
+
+**D-27. CLI harness instead of Criterion.** One run reports latency, the rejection histogram
+and byte counts together, and can write JSON. In-process numbers would make Criterion's
+statistical machinery misleading about a system whose real cost is the MPC.
+
+## Repository
+
+**D-28. Name `cairn`, private, no license granted.** `exocognosis/cairn` was free. No license
+file is added; the owner should choose one.
+
+**D-29. Repository location.** Created at `~/Developer/cairn`, next to the projects it builds
+on. Nothing was written to those checkouts: pqc-sidecar is built into cairn's `target/`.
