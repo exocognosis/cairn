@@ -153,7 +153,11 @@ numbers; with ~1900 rounds the mask phase is latency-bound on a real network (un
   against this backend, including the byte-for-byte deterministic FIPS 204 signature.
 - malicious-rep-field-party.x: `local_test.py` passed with `-S 20` (yes); it does not run at
   the default security parameter (see above); the Rust tests were not run against it.
-- Not tested: three separate hosts, Linux (developed and run on macOS), behaviour under an
+- Linux (added later, outside this directory's original testing): built from the same MP-SPDZ
+  commit on Ubuntu 24.04 x86_64 and run for 103 attempts behind a split-host cairn cluster with
+  no failed run; mask 1.48 s, response 0.33 s inside MP-SPDZ, same data and round counts as
+  above. All three parties were on that one host.
+- Not tested: three separate hosts, behaviour under an
   actively deviating MPC party, port collisions between sessions, attempts above 4.
 - Not reviewed: the security argument for the openings is the one sketched above and in the
   `.mpc` docstring; it has had no independent review.

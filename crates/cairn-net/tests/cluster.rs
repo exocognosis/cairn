@@ -232,11 +232,7 @@ async fn links_are_mutually_authenticated() {
             message: message("tls"),
         },
     };
-    let link = |tls| Link {
-        timeout: TIMEOUT,
-        delay: Duration::ZERO,
-        tls,
-    };
+    let link = |tls| Link::new(TIMEOUT, Duration::ZERO, tls);
 
     // The coordinator's certificate is accepted.
     let ok = call(

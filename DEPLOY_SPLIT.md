@@ -7,9 +7,12 @@ Run one cairn cluster across two machines:
 | **Mac** (Apple Silicon) | Leaf A: `leaf_1/signer_1..4`; `cairn serve-kms` (coordinator); `pqc-sidecar` |
 | **Linux** server | Leaves B to D: `leaf_2..4/signer_1..4`; root engines `root_1..4`; the MPC backend; CometBFT |
 
-**Status.** These are the same binaries and flags that `scripts/run_local_cluster.sh` runs on one
-machine, where they are tested. The split layout below has not been run on two hosts. Read the
-three warnings first.
+**Status.** This split was run once, on 2026-11-24, between an Apple M3 and a Hetzner server in
+Helsinki (178 ms apart), with the reference worker and with MP-SPDZ, including a stock
+pqc-sidecar signing a checkpoint; results are in the README. That run used the two scripts in
+`scripts/split-host/` with every node on loopback and SSH port forwards between the hosts
+(section 6). The direct-address layout in sections 2 to 4 uses the same binaries and flags but
+has not itself been run. `cairn mock-chain` stood in for CometBFT. Read the three notes first.
 
 1. **Links are TLS, keep them private anyway.** Node links are mutually authenticated TLS 1.3,
    so sub-shares are encrypted in transit. Still bind nodes to private or tunnel addresses
@@ -160,3 +163,39 @@ round timeouts.
 ```bash
 pkill -f "cairn (node|serve-kms|mpc-worker)"
 ```
+
+## 6. The layout that was actually run: loopback plus SSH forwards
+
+Only the Mac opens connections, so nothing needs to listen on a public or tunnel address:
+every node binds to loopback on its own host, both hosts use the same address book, and the Mac
+forwards the server's node ports over SSH.
+
+On the Mac:
+
+```bash
+target/release/cairn keygen --out target/split/keys --base-port 17100
+```
+
+Copy the Linux binary (cross-compiled with `cargo zigbuild --release -p cairn-sidecar --target
+x86_64-unknown-linux-gnu.2.35`), the server's key files as in section 2, `mpc/mp-spdz/*` and
+`scripts/split-host/remote.sh` to `/root/cairn/` on the server. Then on the server:
+
+```bash
+/root/cairn/remote.sh start reference
+```
+
+(`start mpspdz` instead uses the MP-SPDZ bridges; it expects MP-SPDZ built in `/root/MP-SPDZ`.)
+And on the Mac:
+
+```bash
+scripts/split-host/local.sh start root@<server>
+```
+
+```bash
+target/release/cairn remote-bench --peers target/split/keys/peers.json --group target/split/keys/group.bin --tls target/split/keys/tls --signatures 50
+```
+
+For MP-SPDZ pass a long MPC deadline: `local.sh start root@<server> 900000` and
+`remote-bench ... --mpc-timeout-ms 900000`. The KMS endpoint is on `127.0.0.1:18200` and the
+chain stand-in on `127.0.0.1:18657` for the pqc-sidecar configuration of section 4.
+`local.sh stop` and `remote.sh stop` end the run.

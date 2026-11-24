@@ -20,7 +20,7 @@
 
 use crate::node::{ready_binding, Peers};
 use crate::tls::TlsIdentity;
-use crate::transport::{call, CallError, Link};
+use crate::transport::{call, CallError, Link, Pool};
 use crate::wire::{Body, Frame, NodeId, Outcome, NET_VERSION};
 use futures_util::future::join_all;
 use mpc_bridge::{hint_from_positions, PARTIES};
@@ -119,6 +119,7 @@ pub struct Coordinator {
     group: Arc<GroupPublic>,
     peers: Peers,
     tls: Arc<TlsIdentity>,
+    pool: Arc<Pool>,
     pub policy: NetPolicy,
     excluded: BTreeSet<NodeId>,
     signed: u64,
@@ -158,6 +159,7 @@ impl Coordinator {
             group,
             peers,
             tls,
+            pool: Arc::default(),
             policy,
             excluded: BTreeSet::new(),
             signed: 0,
@@ -199,6 +201,7 @@ impl Coordinator {
             timeout,
             delay: self.policy.link_delay,
             tls: self.tls.clone(),
+            pool: self.pool.clone(),
         };
         match call(addr, &link, &frame).await {
             Ok(x) => {

@@ -261,7 +261,7 @@ and the TCP cluster; the cluster signer owns a small tokio runtime behind the bl
 which would make the row uninformative. The benchmark uses a peer that accepts and never
 answers, and reinstates it before every certificate, so the row shows the worst case.
 
-**D-53. WAN latency is injected, not measured.** `--link-delay-ms` sleeps before every send on
+**D-53. WAN latency is injected, not measured (superseded by the two-host run, D-60 to D-64).** `--link-delay-ms` sleeps before every send on
 every node; nothing here ran across two hosts. DEPLOY_SPLIT.md gives the commands; they are the
 same binaries and flags the local scripts run, and have not been executed on a split pair.
 
@@ -299,3 +299,32 @@ redistributing the table.
 **D-59. Still one connection per exchange.** Each exchange now also pays a TLS handshake. On
 loopback that is CPU only; on a WAN it is an extra round trip that the injected-latency
 benchmark does not model.
+
+# v2.2: two-host run
+
+**D-60. Pooled connections (supersedes D-36 and D-59).** The first two-host measurement was
+16 s per certificate at 178 ms round trip, because every exchange paid a TCP and a TLS
+handshake. The transport now keeps idle authenticated connections per peer and the server
+serves any number of exchanges per connection. A connection returns to the pool only after a
+complete exchange; a failed reuse is retried once on a new connection. Result: 6 s.
+
+**D-61. A frame is one write.** Length prefix and body go out in a single buffer so a small
+first write cannot wait behind Nagle's algorithm or a tunnel.
+
+**D-62. SSH port forwards for the split run.** Only the Mac opens connections (coordinator to
+nodes, leaf 1 signers to engines), so forwarding the server's node ports over SSH needs no open
+port and no firewall change on the server, and both hosts can use the same loopback address
+book. The cost is TCP-over-TCP under the TLS links; the numbers include it.
+
+**D-63. `remote-bench` and `scripts/split-host/`.** The benchmark logic was split so it can
+drive a cluster that is already running elsewhere; the two scripts are what the run used.
+
+**D-64. A temporary server, deleted afterwards.** The only existing server hosts production
+services with 2.7 GB free, so the run used a Hetzner `cpx42` in Helsinki for about 45 minutes
+(billed one hour) and removed it together with the SSH key registered for it. `cx43`, `cx53`
+had no capacity and `cpx41` is not sold in the EU sites.
+
+**D-65. Setup cost left as is.** After pooling, most of a certificate's WAN time with the
+reference backend is session setup payload (share-check values, opened `z`). Caching engine
+shares across checkpoints or compressing those payloads would cut it; neither is done, because
+with a real MPC backend the attempts dominate anyway.

@@ -40,6 +40,9 @@ Multi-process cluster:
       inside this process.
   cairn mock-chain [--listen <addr:port>] [--chain-id <id>] [--height <n>]
       Minimal CometBFT RPC stand-in for end-to-end runs without a chain.
+  cairn remote-bench --peers <peers.json> --group <group.bin> --tls <dir> [--signatures <n>]
+                     [--round-timeout-ms <n>] [--mpc-timeout-ms <n>]
+      Measure signing through a cluster that is already running (for example across hosts).
   cairn cluster-bench [--signatures <n>] [--rtt-ms <a,b,...>] [--json <file>]
       Spawn 16 signer, 4 root-engine and 1 MPC-worker processes per scenario and measure.
 
@@ -239,11 +242,11 @@ fn run(args: &[String]) -> Result<(), String> {
                 .map_err(|e| e.to_string())?,
             );
             let delay = Duration::from_millis(ms(args, "--link-delay-ms", 0)?);
-            let link = Link {
-                timeout: Duration::from_millis(ms(args, "--round-timeout-ms", 2000)?),
+            let link = Link::new(
+                Duration::from_millis(ms(args, "--round-timeout-ms", 2000)?),
                 delay,
-                tls: tls(args, id)?,
-            };
+                tls(args, id)?,
+            );
             let fault: FaultMode =
                 arg(args, "--fault").map_or(Ok(FaultMode::None), |f| f.parse())?;
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -344,6 +347,28 @@ fn run(args: &[String]) -> Result<(), String> {
                 let doc = json!(results.iter().map(bench::cluster_json).collect::<Vec<_>>());
                 std::fs::write(&path, format!("{doc:#}\n")).map_err(|e| e.to_string())?;
             }
+            Ok(())
+        }
+        Some("remote-bench") => {
+            let n: u32 = arg(args, "--signatures")
+                .map_or(Ok(20), |v| v.parse())
+                .map_err(|_| "bad --signatures")?;
+            let peers = peers(args)?.ok_or("remote-bench needs --peers")?;
+            let file = arg(args, "--group").ok_or("remote-bench needs --group <group.bin>")?;
+            let group = Arc::new(net::read_group(&PathBuf::from(file)).map_err(|e| e.to_string())?);
+            let policy = NetPolicy {
+                round_timeout: Duration::from_millis(ms(args, "--round-timeout-ms", 5000)?),
+                mpc_timeout: Duration::from_millis(ms(args, "--mpc-timeout-ms", 30_000)?),
+                ..NetPolicy::default()
+            };
+            let nodes = peers.len();
+            let pk = group.pk;
+            let mut signer =
+                ClusterSigner::new(group, peers, policy, tls(args, NodeId::Coordinator)?)
+                    .map_err(|e| e.to_string())?;
+            let result = bench::measure(&mut signer, &pk, bench::Scenario::Healthy, n, 0, nodes)?;
+            println!("{}", bench::cluster_markdown(std::slice::from_ref(&result)));
+            println!("{:#}", bench::cluster_json(&result));
             Ok(())
         }
         _ => Err(USAGE.into()),

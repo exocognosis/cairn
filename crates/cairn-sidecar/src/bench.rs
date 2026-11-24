@@ -273,8 +273,27 @@ pub fn run_cluster(
         cluster.coordinator_tls().map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    let key_id = crate::certificate::key_id(&cluster.group.pk);
+    measure(
+        &mut signer,
+        &cluster.group.pk,
+        scenario,
+        signatures,
+        rtt_ms,
+        cluster.processes(),
+    )
+}
 
+/// Sign `signatures` checkpoint messages through `signer` and summarize. Works against any
+/// running cluster, local or remote.
+pub fn measure(
+    signer: &mut crate::cluster::ClusterSigner,
+    pk: &[u8; threshold_mldsa::PUBLIC_KEY_BYTES],
+    scenario: Scenario,
+    signatures: u32,
+    rtt_ms: u64,
+    processes: usize,
+) -> Result<ClusterBenchResult, String> {
+    let key_id = crate::certificate::key_id(pk);
     let (mut latency, mut rejections, mut signer_bytes, mut engine_bytes) =
         (vec![], vec![], vec![], vec![]);
     let (mut retries, mut total, mut exchanges) = (0.0, 0.0, 0.0);
@@ -309,7 +328,7 @@ pub fn run_cluster(
     Ok(ClusterBenchResult {
         scenario,
         rtt_ms,
-        processes: cluster.processes(),
+        processes,
         signatures,
         latency_ms: summarize(latency),
         rejections: summarize(rejections),

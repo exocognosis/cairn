@@ -186,11 +186,7 @@ impl LocalCluster {
                         group: group.clone(),
                         share,
                         peers: peers.clone(),
-                        link: Link {
-                            timeout: round_timeout,
-                            delay,
-                            tls: Arc::new(tls.identity(id)?),
-                        },
+                        link: Link::new(round_timeout, delay, Arc::new(tls.identity(id)?)),
                         fault: fault(id),
                     };
                     tokio::spawn(run_signer(listener, node, delay))
