@@ -1,0 +1,20 @@
+[package]
+name = "mpc-bridge"
+description = "IPC bridge from cairn's non-linear attempt engine to a 3-party MPC backend (Unix sockets, binary framing), with a clear-text reference worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "cairn-mpc-worker"
+path = "src/main.rs"
+
+[dependencies]
+rand.workspace = true
+thiserror.workspace = true
+threshold-mldsa = { path = "../threshold-mldsa" }
+zeroize.workspace = true
+
+[dev-dependencies]
+cascade-tower = { path = "../cascade-tower" }
