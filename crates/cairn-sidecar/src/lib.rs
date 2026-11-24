@@ -10,6 +10,7 @@
 pub mod bench;
 pub mod certificate;
 pub mod certifier;
+pub mod cluster;
 pub mod kms;
 
 pub use certificate::{key_id, Certificate, CertificateError, Checkpoint};

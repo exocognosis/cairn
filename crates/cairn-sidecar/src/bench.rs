@@ -205,3 +205,154 @@ pub fn histogram(r: &BenchResult) -> String {
     }
     out
 }
+
+/// One row of the multi-process benchmark.
+#[derive(Debug, Clone)]
+pub struct ClusterBenchResult {
+    pub scenario: Scenario,
+    pub rtt_ms: u64,
+    pub processes: usize,
+    pub signatures: u32,
+    /// Wall-clock time per certificate, milliseconds, measured at the coordinator.
+    pub latency_ms: Summary,
+    pub rejections: Summary,
+    pub fault_retries: f64,
+    /// Bytes per active signer per certificate (coordinator link plus sub-shares to engines).
+    pub signer_bytes: Summary,
+    /// Bytes per active root engine per certificate on its coordinator link.
+    pub engine_bytes: Summary,
+    /// All TCP bytes per certificate.
+    pub total_bytes: f64,
+    pub exchanges: f64,
+}
+
+/// Run one scenario against a freshly spawned cluster of OS processes on loopback.
+/// `rtt_ms` is the injected round-trip time on every link (half on each direction).
+pub fn run_cluster(
+    exe: &std::path::Path,
+    work: &std::path::Path,
+    scenario: Scenario,
+    signatures: u32,
+    rtt_ms: u64,
+) -> Result<ClusterBenchResult, String> {
+    use crate::cluster::{ClusterOptions, ClusterSigner, ProcessCluster};
+    use cairn_net::{FaultMode, NetPolicy, NodeId};
+    use std::time::Duration;
+
+    let faults = match scenario {
+        Scenario::Healthy => vec![],
+        // A stalled peer (accepts, never answers) is the worst kind of offline: it costs the
+        // whole wall-clock deadline. A dead one is refused at once.
+        Scenario::OneOffline => vec![(NodeId::Signer { leaf: 1, signer: 1 }, FaultMode::Stall)],
+        Scenario::OneMalicious => {
+            vec![(NodeId::Signer { leaf: 2, signer: 2 }, FaultMode::BadShare)]
+        }
+    };
+    let round_timeout_ms = 1000;
+    let options = ClusterOptions {
+        exe: exe.to_path_buf(),
+        dir: work.join(format!("{}-{rtt_ms}", scenario.name())),
+        seed: rand::random(),
+        faults,
+        link_delay_ms: rtt_ms / 2,
+        round_timeout_ms,
+    };
+    let cluster =
+        ProcessCluster::spawn(&options).map_err(|e| format!("spawning the cluster: {e}"))?;
+    let policy = NetPolicy {
+        round_timeout: Duration::from_millis(round_timeout_ms),
+        link_delay: Duration::from_millis(rtt_ms / 2),
+        // Forget exclusions before every certificate, so the fault is paid every time.
+        reinstate_every: 1,
+        ..NetPolicy::default()
+    };
+    let mut signer = ClusterSigner::new(cluster.group.clone(), cluster.peers.clone(), policy)
+        .map_err(|e| e.to_string())?;
+    let key_id = crate::certificate::key_id(&cluster.group.pk);
+
+    let (mut latency, mut rejections, mut signer_bytes, mut engine_bytes) =
+        (vec![], vec![], vec![], vec![]);
+    let (mut retries, mut total, mut exchanges) = (0.0, 0.0, 0.0);
+    for i in 1..=signatures as u64 {
+        let checkpoint = Checkpoint {
+            chain: "cosmos:cairn-bench-1".into(),
+            epoch: 1,
+            height: i * 100,
+            block_hash: rand::random::<[u8; 32]>().to_vec(),
+            finality_commitment: rand::random::<[u8; 32]>().to_vec(),
+        };
+        let message = checkpoint
+            .signing_message(&key_id)
+            .map_err(|e| e.to_string())?;
+        let (_, report) = signer.sign_with_report(&message)?;
+        latency.push(report.elapsed.as_secs_f64() * 1e3);
+        rejections.push(report.rejections as f64);
+        retries += report.retries as f64;
+        exchanges += report.exchanges as f64;
+        total += (report.coordinator_bytes.values().sum::<u64>()
+            + report.p2p_bytes.values().sum::<u64>()) as f64;
+        for id in &report.signers {
+            let bytes = report.coordinator_bytes.get(id).unwrap_or(&0)
+                + report.p2p_bytes.get(id).unwrap_or(&0);
+            signer_bytes.push(bytes as f64);
+        }
+        for id in &report.engines {
+            engine_bytes.push(*report.coordinator_bytes.get(id).unwrap_or(&0) as f64);
+        }
+    }
+    let n = signatures as f64;
+    Ok(ClusterBenchResult {
+        scenario,
+        rtt_ms,
+        processes: cluster.processes(),
+        signatures,
+        latency_ms: summarize(latency),
+        rejections: summarize(rejections),
+        fault_retries: retries / n,
+        signer_bytes: summarize(signer_bytes),
+        engine_bytes: summarize(engine_bytes),
+        total_bytes: total / n,
+        exchanges: exchanges / n,
+    })
+}
+
+pub fn cluster_json(r: &ClusterBenchResult) -> Value {
+    json!({
+        "scenario": r.scenario.name(),
+        "rtt_ms": r.rtt_ms,
+        "processes": r.processes,
+        "signatures": r.signatures,
+        "latency_ms": summary_json(&r.latency_ms),
+        "rejections": summary_json(&r.rejections),
+        "fault_retries_mean": r.fault_retries,
+        "signer_bytes": summary_json(&r.signer_bytes),
+        "engine_bytes": summary_json(&r.engine_bytes),
+        "total_bytes_mean": r.total_bytes,
+        "exchanges_mean": r.exchanges,
+    })
+}
+
+pub fn cluster_markdown(results: &[ClusterBenchResult]) -> String {
+    let mut out = String::from(
+        "| RTT ms | scenario | certs | latency ms (mean / p50 / p95 / max) | rejections (mean) | fault retries | signer bytes (mean) | engine bytes (mean) | total kB per cert | exchanges |\n|---|---|---|---|---|---|---|---|---|---|\n",
+    );
+    for r in results {
+        out += &format!(
+            "| {} | {} | {} | {:.0} / {:.0} / {:.0} / {:.0} | {:.2} | {:.2} | {:.0} | {:.0} | {:.0} | {:.0} |\n",
+            r.rtt_ms,
+            r.scenario.name(),
+            r.signatures,
+            r.latency_ms.mean,
+            r.latency_ms.p50,
+            r.latency_ms.p95,
+            r.latency_ms.max,
+            r.rejections.mean,
+            r.fault_retries,
+            r.signer_bytes.mean,
+            r.engine_bytes.mean,
+            r.total_bytes / 1e3,
+            r.exchanges,
+        );
+    }
+    out
+}

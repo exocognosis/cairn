@@ -12,14 +12,17 @@ path = "src/main.rs"
 
 [dependencies]
 base64.workspace = true
+cairn-net = { path = "../cairn-net" }
 cascade-tower = { path = "../cascade-tower" }
 hex.workspace = true
+mpc-bridge = { path = "../mpc-bridge" }
 rand.workspace = true
 serde_json.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
 threshold-mldsa = { path = "../threshold-mldsa" }
 tiny_http.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 ml-dsa.workspace = true

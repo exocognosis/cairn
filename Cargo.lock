@@ -71,15 +71,18 @@ name = "cairn-sidecar"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "cairn-net",
  "cascade-tower",
  "hex",
  "ml-dsa",
+ "mpc-bridge",
  "rand",
  "serde_json",
  "sha3",
  "thiserror",
  "threshold-mldsa",
  "tiny_http",
+ "tokio",
 ]
 
 [[package]]

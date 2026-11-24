@@ -18,6 +18,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use threshold_mldsa::AttemptEngine;
+use threshold_mldsa::{PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 use tiny_http::{Header, Response, Server};
 
 /// DER SubjectPublicKeyInfo header for ML-DSA-65 (OID 2.16.840.1.101.3.4.3.18).
@@ -28,6 +29,24 @@ pub const SPKI_PREFIX: [u8; 22] = [
 
 /// Largest message KMS accepts with `MessageType = RAW`.
 pub const MAX_RAW_MESSAGE: usize = 4096;
+
+/// Whatever produces signatures behind the endpoint: the in-process tower or a TCP cluster.
+pub trait KmsSigner: Send + 'static {
+    fn public_key(&self) -> [u8; PUBLIC_KEY_BYTES];
+    fn sign(&mut self, message: &[u8]) -> Result<[u8; SIGNATURE_BYTES], String>;
+}
+
+impl<E: AttemptEngine + Send + 'static> KmsSigner for TowerCertifier<E> {
+    fn public_key(&self) -> [u8; PUBLIC_KEY_BYTES] {
+        *TowerCertifier::public_key(self)
+    }
+
+    fn sign(&mut self, message: &[u8]) -> Result<[u8; SIGNATURE_BYTES], String> {
+        self.sign_message(message)
+            .map(|s| s.signature)
+            .map_err(|e| e.to_string())
+    }
+}
 
 pub struct KmsEndpoint {
     pub addr: SocketAddr,
@@ -57,17 +76,13 @@ impl Drop for KmsEndpoint {
     }
 }
 
-fn handle<E: AttemptEngine>(
-    certifier: &mut TowerCertifier<E>,
-    target: &str,
-    body: &[u8],
-) -> (u16, Value) {
+fn handle(certifier: &mut dyn KmsSigner, target: &str, body: &[u8]) -> (u16, Value) {
     let error = |code: &str, msg: &str| (400, json!({ "__type": code, "message": msg }));
     let req: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     let key = req["KeyId"].as_str().unwrap_or("").to_owned();
     match target {
         "TrentService.GetPublicKey" => {
-            let der = [SPKI_PREFIX.as_slice(), certifier.public_key()].concat();
+            let der = [SPKI_PREFIX.as_slice(), &certifier.public_key()].concat();
             (
                 200,
                 json!({
@@ -92,19 +107,19 @@ fn handle<E: AttemptEngine>(
             if message.len() > MAX_RAW_MESSAGE {
                 return error("ValidationException", "Message longer than 4096 bytes");
             }
-            match certifier.sign_message(&message) {
+            match certifier.sign(&message) {
                 Ok(signed) => (
                     200,
                     json!({
                         "KeyId": key,
-                        "Signature": B64.encode(signed.signature),
+                        "Signature": B64.encode(signed),
                         "SigningAlgorithm": "ML_DSA_SHAKE_256",
                     }),
                 ),
                 // The tower could not sign (quorum lost, retries exhausted). Retryable.
                 Err(e) => (
                     500,
-                    json!({ "__type": "KMSInternalException", "message": e.to_string() }),
+                    json!({ "__type": "KMSInternalException", "message": e }),
                 ),
             }
         }
@@ -113,10 +128,7 @@ fn handle<E: AttemptEngine>(
 }
 
 /// Serve the KMS-compatible API on `listen` (use port 0 for an ephemeral port).
-pub fn serve<E: AttemptEngine + Send + 'static>(
-    listen: &str,
-    mut certifier: TowerCertifier<E>,
-) -> std::io::Result<KmsEndpoint> {
+pub fn serve(listen: &str, mut certifier: impl KmsSigner) -> std::io::Result<KmsEndpoint> {
     let server = Arc::new(Server::http(listen).map_err(std::io::Error::other)?);
     let addr = server
         .server_addr()

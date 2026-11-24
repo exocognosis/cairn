@@ -305,12 +305,7 @@ mod tests {
                         .collect::<Vec<_>>()
                         .iter(),
                 );
-                let weighted = AdditiveShare::sum(
-                    set.iter()
-                        .map(|j| &flattened[&vec![*i, *j]])
-                        .collect::<Vec<_>>()
-                        .into_iter(),
-                );
+                let weighted = AdditiveShare::sum(set.iter().map(|j| &flattened[&vec![*i, *j]]));
                 assert!(
                     weighted == sigma.scale(lagrange_at_zero(*i, &root_set)),
                     "Lambda_i * sigma_i"
