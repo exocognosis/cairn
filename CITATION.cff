@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software or its measurements, please cite it as below.
+type: software
+title: >-
+  cairn: committee-tower threshold ML-DSA-65 signing for proof-of-stake
+  checkpoints
+abstract: >-
+  Research implementation in which a quorum of validators jointly produces one
+  standard ML-DSA-65 (FIPS 204) signature over a finalized checkpoint, verified
+  by unmodified FIPS 204 code. Sixteen signers in nested 3-of-4 committees
+  compress their key shares into a three-party additive sharing; a three-party
+  MPC (MP-SPDZ) evaluates the exact FIPS 204 ExpandMask, the rounding functions
+  and the abort checks. Includes a multi-process implementation over mutual
+  TLS, an integration with the PQC Sidecar checkpoint daemon, and measurements
+  on one host and across two hosts. Research artifact; not production
+  cryptography.
+authors:
+  - family-names: Glenn
+    given-names: Rick
+    affiliation: Dytallix
+repository-code: "https://github.com/exocognosis/cairn"
+url: "https://github.com/exocognosis/cairn"
+version: 0.2.0-research-preview
+date-released: "2026-11-24"
+keywords:
+  - post-quantum cryptography
+  - ML-DSA
+  - FIPS 204
+  - threshold signatures
+  - multi-party computation
+  - proof-of-stake
+  - checkpoint certificates

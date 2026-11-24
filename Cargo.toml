@@ -8,6 +8,11 @@ edition = "2021"
 rust-version = "1.80"
 publish = false
 repository = "https://github.com/exocognosis/cairn"
+homepage = "https://github.com/exocognosis/cairn"
+authors = ["Rick Glenn"]
+keywords = ["post-quantum", "ml-dsa", "threshold", "mpc", "fips204"]
+categories = ["cryptography"]
+readme = "README.md"
 
 [workspace.dependencies]
 base64 = "0.22"
