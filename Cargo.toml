@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/threshold-mldsa", "crates/cascade-tower", "crates/mpc-bridge", "crates/cairn-sidecar"]
+members = ["crates/threshold-mldsa", "crates/cascade-tower", "crates/mpc-bridge", "crates/cairn-net", "crates/cairn-sidecar"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +20,8 @@ serde_json = "1"
 sha3 = "0.10"
 thiserror = "1"
 tiny_http = "0.12"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "macros", "sync"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 zeroize = { version = "1", features = ["derive"] }
 
 [profile.release]

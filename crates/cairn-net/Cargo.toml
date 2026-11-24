@@ -1,0 +1,19 @@
+[package]
+name = "cairn-net"
+description = "Multi-process execution of the cairn tower: framed TCP transport, signer and root-engine nodes, session coordinator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+bincode.workspace = true
+futures-util.workspace = true
+mpc-bridge = { path = "../mpc-bridge" }
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+threshold-mldsa = { path = "../threshold-mldsa" }
+tokio.workspace = true
+zeroize.workspace = true
