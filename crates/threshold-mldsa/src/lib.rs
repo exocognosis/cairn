@@ -10,6 +10,7 @@
 
 pub mod engine;
 pub mod fips204;
+pub mod flatten;
 pub mod keys;
 pub mod party;
 pub mod protocol;
@@ -17,6 +18,7 @@ pub mod session;
 
 pub use engine::{AttemptEngine, TrustedEngine};
 pub use fips204::{PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
+pub use flatten::AdditiveShare;
 pub use keys::{deal, Active, Gadget, GroupPublic, KeyShare, Path, ShapeError, MAX_COMMITTEE};
 pub use party::{Behavior, Committee, Party, Signer};
 pub use protocol::{Fault, FaultKind, Message, Round, Wire};

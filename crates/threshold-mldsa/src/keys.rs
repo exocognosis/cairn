@@ -135,6 +135,67 @@ impl GroupPublic {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct GroupFile {
+    pk: Vec<u8>,
+    rho: [u8; 32],
+    tr: Vec<u8>,
+    t0: Vec<i32>,
+    shape: Vec<Gadget>,
+    verification: Vec<(Path, Vec<i32>)>,
+    seed_commitments: Vec<(Path, [u8; 32])>,
+}
+
+impl GroupPublic {
+    /// Serialize the public group description (no secrets) for distribution to every node.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let flat = |v: &PolyVec| v.iter().flatten().copied().collect();
+        let file = GroupFile {
+            pk: self.pk.to_vec(),
+            rho: self.rho,
+            tr: self.tr.to_vec(),
+            t0: flat(&self.t0),
+            shape: self.shape.clone(),
+            verification: self
+                .verification
+                .iter()
+                .map(|(p, v)| (p.clone(), flat(v)))
+                .collect(),
+            seed_commitments: self
+                .seed_commitments
+                .iter()
+                .map(|(p, c)| (p.clone(), *c))
+                .collect(),
+        };
+        bincode::serialize(&file).expect("group encoding cannot fail")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let file: GroupFile = bincode::deserialize(bytes).ok()?;
+        let polys = |flat: &[i32]| -> Option<PolyVec> {
+            (flat.len() == K * N && flat.iter().all(|c| (0..Q).contains(c)))
+                .then(|| flat.chunks(N).map(|c| c.try_into().unwrap()).collect())
+        };
+        let mut verification = BTreeMap::new();
+        for (path, flat) in &file.verification {
+            verification.insert(path.clone(), polys(flat)?);
+        }
+        for g in &file.shape {
+            Gadget::new(g.t as usize, g.n as usize).ok()?;
+        }
+        Some(Self {
+            pk: file.pk.try_into().ok()?,
+            rho: file.rho,
+            tr: file.tr.try_into().ok()?,
+            t0: polys(&file.t0)?,
+            shape: file.shape,
+            verification,
+            seed_commitments: file.seed_commitments.into_iter().collect(),
+            a_hat: OnceLock::new(),
+        })
+    }
+}
+
 /// Trusted-dealer key generation for a tower of the given shape (root first).
 /// Returns the public description and one share per signer, in path order.
 pub fn deal<R: Rng + CryptoRng>(

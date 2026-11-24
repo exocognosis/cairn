@@ -73,6 +73,13 @@ impl Sealed<MaskShare> {
     }
 }
 
+impl MaskShare {
+    /// Wrap a mask (or mask share) produced inside an engine.
+    pub fn engine_new(y: PolyVec) -> Self {
+        Self(y)
+    }
+}
+
 /// A signer's linear response share: `z_p = y_p + c w_p s1_p`, `r_p = A y_p - c w_p s2_p`.
 pub struct ResponsePart {
     pub path: Path,
@@ -152,6 +159,99 @@ fn blame(path: &Path, kind: FaultKind) -> Fault {
     }
 }
 
+/// Engine-side: check every active signer's seed share against its dealt commitment and combine
+/// them. Returns the 32 bytes of `K` as field elements (each must be below 256).
+pub fn combine_seed(
+    group: &GroupPublic,
+    active: &Active,
+    seeds: Sealed<Vec<SeedPart>>,
+) -> Result<[i32; 32], Fault> {
+    let mut seeds = seeds.engine_open();
+    let mut k_acc = [0i32; 32];
+    let mut result = Ok(());
+    for (path, w) in &active.weights() {
+        let Some(part) = seeds.iter().find(|p| &p.path == path) else {
+            result = Err(blame(path, FaultKind::BadSeedShare));
+            break;
+        };
+        if group.seed_commitments.get(path) != Some(&seed_share_commitment(path, &part.k_share)) {
+            result = Err(blame(path, FaultKind::BadSeedShare));
+            break;
+        }
+        for (acc, v) in k_acc.iter_mut().zip(part.k_share) {
+            *acc = red(*acc as i64 + fq_mul(v, *w) as i64);
+        }
+    }
+    seeds.iter_mut().for_each(|p| p.k_share.zeroize());
+    if result.is_ok() && k_acc.iter().any(|&v| v > 255) {
+        result = Err(Fault {
+            culprit: None,
+            kind: FaultKind::Unattributed,
+        });
+    }
+    if let Err(e) = result {
+        k_acc.zeroize();
+        return Err(e);
+    }
+    Ok(k_acc)
+}
+
+/// Sums of the response shares after the per-signer linear check.
+pub struct CheckedResponse {
+    pub z: PolyVec,
+    pub r: PolyVec,
+    /// `sum w_p T_p`, the full `t = A s1 + s2`.
+    pub t: PolyVec,
+    pub z_digests: Vec<(Path, [u8; 32])>,
+}
+
+/// Engine-side: check `A z_p - r_p = c w_p T_p` for every active signer and sum the shares.
+pub fn check_and_sum(
+    group: &GroupPublic,
+    active: &Active,
+    c_tilde: &[u8; C_TILDE_BYTES],
+    parts: Sealed<Vec<ResponsePart>>,
+) -> Result<CheckedResponse, Fault> {
+    let unattributed = || Fault {
+        culprit: None,
+        kind: FaultKind::Unattributed,
+    };
+    let mut parts = parts.engine_open();
+    let c = sample_in_ball(c_tilde);
+    let mut out = CheckedResponse {
+        z: vec_zero(L),
+        r: vec_zero(K),
+        t: vec_zero(K),
+        z_digests: Vec::new(),
+    };
+    let mut result = Ok(());
+    for (path, weight) in active.weights() {
+        let Some(part) = parts.iter().find(|p| p.path == path) else {
+            result = Err(blame(&path, FaultKind::InconsistentResponse));
+            break;
+        };
+        let Some(t_p) = group.verification.get(&path) else {
+            result = Err(unattributed());
+            break;
+        };
+        let weighted = vec_scale(t_p, weight);
+        let lhs = vec_sub(&mat_vec_coeff(group.a_hat(), &part.z), &part.r);
+        if lhs != challenge_mul(&c, &weighted) {
+            result = Err(blame(&path, FaultKind::InconsistentResponse));
+            break;
+        }
+        out.z = vec_add(&out.z, &part.z);
+        out.r = vec_add(&out.r, &part.r);
+        out.t = vec_add(&out.t, &weighted);
+        out.z_digests.push((path, z_digest(&part.z)));
+    }
+    parts.iter_mut().for_each(|p| {
+        p.z.zeroize();
+        p.r.zeroize();
+    });
+    result.map(|()| out)
+}
+
 impl AttemptEngine for TrustedEngine {
     fn mask_phase(
         &mut self,
@@ -162,30 +262,7 @@ impl AttemptEngine for TrustedEngine {
     ) -> Result<MaskOpening, Fault> {
         self.mask_phases += 1;
         self.pending = None;
-        let mut seeds = seeds.engine_open();
-        let weights = active.weights();
-        let mut k_acc = [0i32; 32];
-        for (path, w) in &weights {
-            let part = seeds
-                .iter()
-                .find(|p| &p.path == path)
-                .ok_or_else(|| blame(path, FaultKind::BadSeedShare))?;
-            if group.seed_commitments.get(path) != Some(&seed_share_commitment(path, &part.k_share))
-            {
-                return Err(blame(path, FaultKind::BadSeedShare));
-            }
-            for (acc, v) in k_acc.iter_mut().zip(part.k_share) {
-                *acc = red(*acc as i64 + fq_mul(v, *w) as i64);
-            }
-        }
-        seeds.iter_mut().for_each(|p| p.k_share.zeroize());
-        if k_acc.iter().any(|&v| v > 255) {
-            k_acc.zeroize();
-            return Err(Fault {
-                culprit: None,
-                kind: FaultKind::Unattributed,
-            });
-        }
+        let mut k_acc = combine_seed(group, active, seeds)?;
         let mut k = k_acc.map(|v| v as u8);
         k_acc.zeroize();
         // Deterministic FIPS 204 variant: rnd = 0^32. kappa advances by L per rejected attempt.
@@ -222,29 +299,12 @@ impl AttemptEngine for TrustedEngine {
             .take()
             .filter(|p| p.session == ctx.session)
             .ok_or_else(unattributed)?;
-        let mut parts = parts.engine_open();
-        let c = sample_in_ball(&pending.c_tilde);
-        let (mut z, mut r) = (vec_zero(L), vec_zero(K));
-        let mut z_digests = Vec::new();
-        for (path, weight) in active.weights() {
-            let part = parts
-                .iter()
-                .find(|p| p.path == path)
-                .ok_or_else(|| blame(&path, FaultKind::InconsistentResponse))?;
-            // Linear consistency against the public verification share: A z_p - r_p = c w_p T_p.
-            let t_p = group.verification.get(&path).ok_or_else(unattributed)?;
-            let lhs = vec_sub(&mat_vec_coeff(group.a_hat(), &part.z), &part.r);
-            if lhs != challenge_mul(&c, &vec_scale(t_p, weight)) {
-                return Err(blame(&path, FaultKind::InconsistentResponse));
-            }
-            z = vec_add(&z, &part.z);
-            r = vec_add(&r, &part.r);
-            z_digests.push((path, z_digest(&part.z)));
-        }
-        parts.iter_mut().for_each(|p| {
-            p.z.zeroize();
-            p.r.zeroize();
-        });
+        let CheckedResponse {
+            mut z,
+            mut r,
+            z_digests,
+            ..
+        } = check_and_sum(group, active, &pending.c_tilde, parts)?;
         // Mask consistency: r must equal w - c s2, so r - w has norm at most beta. This holds
         // or fails independently of the rejection outcome, so checking it first leaks nothing.
         let consistent = inf_norm(&vec_sub(&r, &pending.w)) <= BETA;
@@ -254,7 +314,7 @@ impl AttemptEngine for TrustedEngine {
             r.zeroize();
             return Err(unattributed());
         }
-        let ct0 = challenge_mul(&c, &group.t0);
+        let ct0 = challenge_mul(&sample_in_ball(&pending.c_tilde), &group.t0);
         let verdict = match finish_attempt(&z, &r, &ct0) {
             Ok(hint) => Verdict::Accept { hint, z_digests },
             Err(_) => Verdict::Reject,
