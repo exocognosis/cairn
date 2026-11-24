@@ -590,16 +590,17 @@ impl Coordinator {
                 }
                 Err(SessionEnd::Faults(faults, engines, session)) => {
                     // Tell the engines to erase the aborted session.
-                    let guard = std::sync::Mutex::new(&mut report);
-                    self.ask_all(
-                        &guard,
-                        &engines,
-                        session,
-                        |_| Body::Abort,
-                        self.policy.round_timeout,
-                    )
-                    .await;
-                    drop(guard);
+                    {
+                        let guard = std::sync::Mutex::new(&mut report);
+                        self.ask_all(
+                            &guard,
+                            &engines,
+                            session,
+                            |_| Body::Abort,
+                            self.policy.round_timeout,
+                        )
+                        .await;
+                    }
                     for f in &faults {
                         match f.culprit {
                             Some(id) => {
