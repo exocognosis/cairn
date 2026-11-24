@@ -76,7 +76,10 @@ pub fn assign(
     }
     let need = params.signers();
     if pool.len() < need {
-        return Err(AssignError::TooFewValidators { have: pool.len(), need });
+        return Err(AssignError::TooFewValidators {
+            have: pool.len(),
+            need,
+        });
     }
 
     let mut h = Shake256::default();
@@ -158,7 +161,12 @@ mod tests {
     use super::*;
 
     fn validators(n: usize) -> Vec<Validator> {
-        (0..n).map(|i| Validator { id: vec![i as u8, 0xaa], stake: 1_000 + 37 * (i as u64 * i as u64 % 101) }).collect()
+        (0..n)
+            .map(|i| Validator {
+                id: vec![i as u8, 0xaa],
+                stake: 1_000 + 37 * (i as u64 * i as u64 % 101),
+            })
+            .collect()
     }
 
     #[test]
@@ -182,16 +190,35 @@ mod tests {
         let p = TowerParams::default_16();
         let mut v = validators(64);
         v[0].stake = 1_000_000; // a whale is seated in (almost) every epoch
-        let seated = (0..200u64).filter(|e| assign(*e, &[3; 32], &v, &p).unwrap().seat_of(&v[0].id).is_some()).count();
+        let seated = (0..200u64)
+            .filter(|e| {
+                assign(*e, &[3; 32], &v, &p)
+                    .unwrap()
+                    .seat_of(&v[0].id)
+                    .is_some()
+            })
+            .count();
         assert!(seated >= 198, "whale seated {seated}/200");
-        let small = (0..200u64).filter(|e| assign(*e, &[3; 32], &v, &p).unwrap().seat_of(&v[1].id).is_some()).count();
+        let small = (0..200u64)
+            .filter(|e| {
+                assign(*e, &[3; 32], &v, &p)
+                    .unwrap()
+                    .seat_of(&v[1].id)
+                    .is_some()
+            })
+            .count();
         assert!(small < 120, "small validator seated {small}/200");
     }
 
     #[test]
     fn snake_order_balances_leaves_and_exposure_uses_the_access_function() {
         let p = TowerParams::default_16();
-        let v: Vec<Validator> = (0..16).map(|i| Validator { id: vec![i], stake: 100 - i as u64 }).collect();
+        let v: Vec<Validator> = (0..16)
+            .map(|i| Validator {
+                id: vec![i],
+                stake: 100 - i as u64,
+            })
+            .collect();
         let a = assign(1, &[0; 32], &v, &p).unwrap();
         let stakes: Vec<u128> = a.leaf_stake().into_values().collect();
         assert!(stakes.iter().max().unwrap() - stakes.iter().min().unwrap() <= 4);
@@ -200,6 +227,9 @@ mod tests {
         assert!(!a.exposure(&p, &eight).can_forge);
         let three: BTreeSet<Vec<u8>> = (0..3).map(|i| vec![i]).collect();
         assert!(!a.exposure(&p, &three).can_block);
-        assert_eq!(assign(1, &[0; 32], &v[..15], &p), Err(AssignError::TooFewValidators { have: 15, need: 16 }));
+        assert_eq!(
+            assign(1, &[0; 32], &v[..15], &p),
+            Err(AssignError::TooFewValidators { have: 15, need: 16 })
+        );
     }
 }

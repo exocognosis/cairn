@@ -146,7 +146,10 @@ impl TrustedEngine {
 }
 
 fn blame(path: &Path, kind: FaultKind) -> Fault {
-    Fault { culprit: Some(path.clone()), kind }
+    Fault {
+        culprit: Some(path.clone()),
+        kind,
+    }
 }
 
 impl AttemptEngine for TrustedEngine {
@@ -167,7 +170,8 @@ impl AttemptEngine for TrustedEngine {
                 .iter()
                 .find(|p| &p.path == path)
                 .ok_or_else(|| blame(path, FaultKind::BadSeedShare))?;
-            if group.seed_commitments.get(path) != Some(&seed_share_commitment(path, &part.k_share)) {
+            if group.seed_commitments.get(path) != Some(&seed_share_commitment(path, &part.k_share))
+            {
                 return Err(blame(path, FaultKind::BadSeedShare));
             }
             for (acc, v) in k_acc.iter_mut().zip(part.k_share) {
@@ -177,7 +181,10 @@ impl AttemptEngine for TrustedEngine {
         seeds.iter_mut().for_each(|p| p.k_share.zeroize());
         if k_acc.iter().any(|&v| v > 255) {
             k_acc.zeroize();
-            return Err(Fault { culprit: None, kind: FaultKind::Unattributed });
+            return Err(Fault {
+                culprit: None,
+                kind: FaultKind::Unattributed,
+            });
         }
         let mut k = k_acc.map(|v| v as u8);
         k_acc.zeroize();
@@ -187,8 +194,15 @@ impl AttemptEngine for TrustedEngine {
         let y = expand_mask(&rho_pp, (ctx.attempt as usize * L) as u16);
         rho_pp.zeroize();
         let (w, c_tilde) = commit_mask(group.a_hat(), &y, &ctx.mu);
-        self.pending = Some(Pending { session: ctx.session, c_tilde, w });
-        Ok(MaskOpening { c_tilde, mask: Sealed(MaskShare(y)) })
+        self.pending = Some(Pending {
+            session: ctx.session,
+            c_tilde,
+            w,
+        });
+        Ok(MaskOpening {
+            c_tilde,
+            mask: Sealed(MaskShare(y)),
+        })
     }
 
     fn response_phase(
@@ -199,8 +213,15 @@ impl AttemptEngine for TrustedEngine {
         parts: Sealed<Vec<ResponsePart>>,
     ) -> Result<Verdict, Fault> {
         self.response_phases += 1;
-        let unattributed = || Fault { culprit: None, kind: FaultKind::Unattributed };
-        let mut pending = self.pending.take().filter(|p| p.session == ctx.session).ok_or_else(unattributed)?;
+        let unattributed = || Fault {
+            culprit: None,
+            kind: FaultKind::Unattributed,
+        };
+        let mut pending = self
+            .pending
+            .take()
+            .filter(|p| p.session == ctx.session)
+            .ok_or_else(unattributed)?;
         let mut parts = parts.engine_open();
         let c = sample_in_ball(&pending.c_tilde);
         let (mut z, mut r) = (vec_zero(L), vec_zero(K));

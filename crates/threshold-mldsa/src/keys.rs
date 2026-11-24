@@ -43,7 +43,10 @@ impl Gadget {
         if t == 0 || t > n {
             return Err(ShapeError::BadThreshold { t, n });
         }
-        Ok(Self { n: n as u8, t: t as u8 })
+        Ok(Self {
+            n: n as u8,
+            t: t as u8,
+        })
     }
 }
 
@@ -102,7 +105,10 @@ impl KeyShare {
 pub(crate) fn seed_share_commitment(path: &[u8], k: &[i32; 32]) -> [u8; 32] {
     let bytes: Vec<u8> = k.iter().flat_map(|v| v.to_le_bytes()).collect();
     let mut out = [0u8; 32];
-    fips204::shake256(&[b"cairn/seed-share/v1", &[path.len() as u8], path, &bytes], &mut out);
+    fips204::shake256(
+        &[b"cairn/seed-share/v1", &[path.len() as u8], path, &bytes],
+        &mut out,
+    );
     out
 }
 
@@ -143,7 +149,12 @@ pub fn deal<R: Rng + CryptoRng>(
         Gadget::new(g.t as usize, g.n as usize)?;
     }
     let key: ExpandedKey = fips204::keygen_internal(seed);
-    let mut flat: Vec<i32> = key.s1.iter().chain(&key.s2).flat_map(|p| p.iter().copied()).collect();
+    let mut flat: Vec<i32> = key
+        .s1
+        .iter()
+        .chain(&key.s2)
+        .flat_map(|p| p.iter().copied())
+        .collect();
     flat.extend(key.k.iter().map(|&b| b as i32));
 
     let mut shares = Vec::new();
@@ -152,7 +163,10 @@ pub fn deal<R: Rng + CryptoRng>(
         if path.len() == shape.len() {
             shares.push(KeyShare::from_flat(path, &secret));
         } else {
-            for (i, child) in shamir_split(&secret, shape[path.len()], rng).into_iter().enumerate() {
+            for (i, child) in shamir_split(&secret, shape[path.len()], rng)
+                .into_iter()
+                .enumerate()
+            {
                 let mut p = path.clone();
                 p.push(i as u8 + 1);
                 stack.push((p, child));
@@ -222,7 +236,8 @@ impl Active {
         match (self, shape.split_first()) {
             (Active::Signer, None) => true,
             (Active::Committee(children), Some((g, rest))) => {
-                children.len() >= g.t as usize && children.iter().all(|(_, c)| c.is_authorized(rest))
+                children.len() >= g.t as usize
+                    && children.iter().all(|(_, c)| c.is_authorized(rest))
             }
             _ => false,
         }
@@ -251,9 +266,30 @@ mod tests {
         assert_eq!(group.pk, key.pk);
         // Leaves 1, 2, 4 with members {1,2,3}, {2,3,4}, {1,3,4}.
         let active = Active::Committee(vec![
-            (1, Active::Committee(vec![(1, Active::Signer), (2, Active::Signer), (3, Active::Signer)])),
-            (2, Active::Committee(vec![(2, Active::Signer), (3, Active::Signer), (4, Active::Signer)])),
-            (4, Active::Committee(vec![(1, Active::Signer), (3, Active::Signer), (4, Active::Signer)])),
+            (
+                1,
+                Active::Committee(vec![
+                    (1, Active::Signer),
+                    (2, Active::Signer),
+                    (3, Active::Signer),
+                ]),
+            ),
+            (
+                2,
+                Active::Committee(vec![
+                    (2, Active::Signer),
+                    (3, Active::Signer),
+                    (4, Active::Signer),
+                ]),
+            ),
+            (
+                4,
+                Active::Committee(vec![
+                    (1, Active::Signer),
+                    (3, Active::Signer),
+                    (4, Active::Signer),
+                ]),
+            ),
         ]);
         assert!(active.is_authorized(&shape));
         let mut s1 = fips204::vec_zero(L);

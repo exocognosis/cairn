@@ -63,7 +63,12 @@ pub enum SignError {
 fn hint_positions(h: &Hint) -> Vec<u16> {
     h.iter()
         .enumerate()
-        .flat_map(|(i, p)| p.iter().enumerate().filter(|(_, &b)| b).map(move |(j, _)| (i * N + j) as u16))
+        .flat_map(|(i, p)| {
+            p.iter()
+                .enumerate()
+                .filter(|(_, &b)| b)
+                .map(move |(j, _)| (i * N + j) as u16)
+        })
         .collect()
 }
 
@@ -89,12 +94,17 @@ fn run_attempt<P: Party, E: AttemptEngine>(
             let openings = root.open(ctx, true, Some(&hint_positions(&hint)), wire)?;
             let mut z = vec_zero(L);
             for (path, digest) in &z_digests {
-                let late = || Fault { culprit: Some(path.clone()), kind: FaultKind::Timeout(Round::HintCarry) };
-                let opening = openings.iter().find(|o| &o.path == path).ok_or_else(late)?;
-                let z_p = unflatten(&opening.z).filter(|z_p| &z_digest(z_p) == digest).ok_or(Fault {
+                let late = || Fault {
                     culprit: Some(path.clone()),
-                    kind: FaultKind::OpeningMismatch,
-                })?;
+                    kind: FaultKind::Timeout(Round::HintCarry),
+                };
+                let opening = openings.iter().find(|o| &o.path == path).ok_or_else(late)?;
+                let z_p = unflatten(&opening.z)
+                    .filter(|z_p| &z_digest(z_p) == digest)
+                    .ok_or(Fault {
+                        culprit: Some(path.clone()),
+                        kind: FaultKind::OpeningMismatch,
+                    })?;
                 z = vec_add(&z, &z_p);
             }
             Ok(Some(fips204::pack_signature(&c_tilde, &z, &hint)))
@@ -133,7 +143,13 @@ pub fn sign<P: Party, E: AttemptEngine>(
                     return Err(SignError::InvalidSignature);
                 }
                 faults.append(&mut wire.faults);
-                let report = SignReport { rejections: attempt, fault_retries: retry, faults, wire, elapsed: start.elapsed() };
+                let report = SignReport {
+                    rejections: attempt,
+                    fault_retries: retry,
+                    faults,
+                    wire,
+                    elapsed: start.elapsed(),
+                };
                 return Ok(Signed { signature, report });
             }
             Ok(None) => {
@@ -144,7 +160,10 @@ pub fn sign<P: Party, E: AttemptEngine>(
             }
             Err(fault) => {
                 root.reset();
-                wire.broadcast(Message::Abort { header: ctx.header(&[]), fault: fault.clone() });
+                wire.broadcast(Message::Abort {
+                    header: ctx.header(&[]),
+                    fault: fault.clone(),
+                });
                 faults.append(&mut wire.faults);
                 faults.push(fault.clone());
                 if fault.culprit.as_deref() == Some(&[]) {

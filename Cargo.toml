@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/threshold-mldsa", "crates/cascade-tower"]
+members = ["crates/threshold-mldsa", "crates/cascade-tower", "crates/cairn-sidecar"]
 
 [workspace.package]
 version = "0.1.0"

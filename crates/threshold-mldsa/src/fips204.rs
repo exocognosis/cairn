@@ -184,9 +184,9 @@ pub fn mat_vec(a_hat: &MatrixHat, v_hat: &[Poly]) -> PolyVec {
     a_hat
         .iter()
         .map(|row| {
-            row.iter()
-                .zip(v_hat)
-                .fold([0i32; N], |acc, (a, v)| poly_add(&acc, &poly_pointwise(a, v)))
+            row.iter().zip(v_hat).fold([0i32; N], |acc, (a, v)| {
+                poly_add(&acc, &poly_pointwise(a, v))
+            })
         })
         .collect()
 }
@@ -266,7 +266,9 @@ fn rej_bounded_poly(seed: &[u8; 64], nonce: u16) -> Poly {
 
 /// FIPS 204 Algorithm 33 (ExpandS), eta = 4.
 pub fn expand_s(rho_prime: &[u8; 64]) -> (PolyVec, PolyVec) {
-    let s1 = (0..L as u16).map(|r| rej_bounded_poly(rho_prime, r)).collect();
+    let s1 = (0..L as u16)
+        .map(|r| rej_bounded_poly(rho_prime, r))
+        .collect();
     let s2 = (0..K as u16)
         .map(|r| rej_bounded_poly(rho_prime, r + L as u16))
         .collect();
@@ -314,7 +316,11 @@ pub fn sample_in_ball(c_tilde: &[u8; C_TILDE_BYTES]) -> Poly {
             }
         };
         c[i] = c[j];
-        c[j] = if (signs >> (i + TAU - N)) & 1 == 1 { Q - 1 } else { 1 };
+        c[j] = if (signs >> (i + TAU - N)) & 1 == 1 {
+            Q - 1
+        } else {
+            1
+        };
     }
     c
 }
@@ -373,7 +379,11 @@ fn pack_bits(vals: impl Iterator<Item = u32>, bits: u32, out: &mut Vec<u8>) {
 /// FIPS 204 Algorithm 28 (w1Encode): 4 bits per coefficient.
 pub fn w1_encode(w1: &[Poly]) -> Vec<u8> {
     let mut out = Vec::with_capacity(K * 128);
-    pack_bits(w1.iter().flat_map(|p| p.iter().map(|&c| c as u32)), 4, &mut out);
+    pack_bits(
+        w1.iter().flat_map(|p| p.iter().map(|&c| c as u32)),
+        4,
+        &mut out,
+    );
     out
 }
 
@@ -385,7 +395,11 @@ pub fn hint_weight(h: &Hint) -> usize {
 }
 
 /// FIPS 204 Algorithm 26 (sigEncode).
-pub fn pack_signature(c_tilde: &[u8; C_TILDE_BYTES], z: &[Poly], h: &Hint) -> [u8; SIGNATURE_BYTES] {
+pub fn pack_signature(
+    c_tilde: &[u8; C_TILDE_BYTES],
+    z: &[Poly],
+    h: &Hint,
+) -> [u8; SIGNATURE_BYTES] {
     let mut out = Vec::with_capacity(SIGNATURE_BYTES);
     out.extend_from_slice(c_tilde);
     pack_bits(
@@ -439,11 +453,23 @@ pub fn keygen_internal(xi: &[u8; 32]) -> ExpandedKey {
     }
     let mut pk = Vec::with_capacity(PUBLIC_KEY_BYTES);
     pk.extend_from_slice(&rho);
-    pack_bits(t1.iter().flat_map(|p| p.iter().map(|&c| c as u32)), 10, &mut pk);
+    pack_bits(
+        t1.iter().flat_map(|p| p.iter().map(|&c| c as u32)),
+        10,
+        &mut pk,
+    );
     let pk: [u8; PUBLIC_KEY_BYTES] = pk.try_into().expect("public key length");
     let mut tr = [0u8; 64];
     shake256(&[&pk], &mut tr);
-    ExpandedKey { rho, k, tr, s1, s2, t0, pk }
+    ExpandedKey {
+        rho,
+        k,
+        tr,
+        s1,
+        s2,
+        t0,
+        pk,
+    }
 }
 
 /// Message representative `mu = H(tr || 0 || len(ctx) || ctx || M)` for pure ML-DSA.Sign.
@@ -523,7 +549,11 @@ pub fn sign_reference(key: &ExpandedKey, message: &[u8]) -> ([u8; SIGNATURE_BYTE
 }
 
 /// Off-the-shelf FIPS 204 verification (RustCrypto `ml-dsa`), empty context.
-pub fn verify_standard(pk: &[u8; PUBLIC_KEY_BYTES], message: &[u8], sig: &[u8; SIGNATURE_BYTES]) -> bool {
+pub fn verify_standard(
+    pk: &[u8; PUBLIC_KEY_BYTES],
+    message: &[u8],
+    sig: &[u8; SIGNATURE_BYTES],
+) -> bool {
     use ml_dsa::{EncodedVerifyingKey, MlDsa65, Signature, VerifyingKey};
     let Ok(enc) = EncodedVerifyingKey::<MlDsa65>::try_from(pk.as_slice()) else {
         return false;
@@ -563,7 +593,10 @@ mod tests {
             let seed = [s.wrapping_mul(37).wrapping_add(1); 32];
             let ours = keygen_internal(&seed);
             let theirs = ExpandedSigningKey::<MlDsa65>::from_seed(&seed.into());
-            assert_eq!(ours.pk.as_slice(), theirs.verifying_key().encode().as_slice());
+            assert_eq!(
+                ours.pk.as_slice(),
+                theirs.verifying_key().encode().as_slice()
+            );
             let msg = [b"cairn reference vector ".as_slice(), &[s]].concat();
             let (sig, _) = sign_reference(&ours, &msg);
             let expect = theirs.sign_deterministic(&msg, &[]).unwrap();

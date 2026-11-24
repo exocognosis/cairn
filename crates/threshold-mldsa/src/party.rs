@@ -16,15 +16,21 @@ use std::sync::Arc;
 use zeroize::Zeroize;
 
 pub type CTilde = [u8; C_TILDE_BYTES];
+/// Signer-level 32-byte values (participation bindings, response commitments) by tower path.
+pub type Tagged = Vec<(Path, [u8; 32])>;
 
 /// One participant of a committee: a signer, or a whole sub-committee acting as one party.
 pub trait Party {
     /// Shamir x-coordinate within the parent committee (1-based).
     fn index(&self) -> u8;
     /// Round 1. Returns the active sub-tree and the signer-level participation bindings.
-    fn commit(&mut self, ctx: &AttemptCtx, wire: &mut Wire) -> Result<(Active, Vec<(Path, [u8; 32])>), Fault>;
+    fn commit(&mut self, ctx: &AttemptCtx, wire: &mut Wire) -> Result<(Active, Tagged), Fault>;
     /// Sealed seed shares for the engine's mask phase.
-    fn seed_input(&mut self, ctx: &AttemptCtx, wire: &mut Wire) -> Result<Sealed<Vec<SeedPart>>, Fault>;
+    fn seed_input(
+        &mut self,
+        ctx: &AttemptCtx,
+        wire: &mut Wire,
+    ) -> Result<Sealed<Vec<SeedPart>>, Fault>;
     /// Round 2. Takes this party's sealed mask share and the opened `c~`; returns the echo.
     fn challenge(
         &mut self,
@@ -35,12 +41,11 @@ pub trait Party {
         wire: &mut Wire,
     ) -> Result<CTilde, Fault>;
     /// Round 3. Commitments to the response shares, and the sealed shares for the engine.
-    #[allow(clippy::type_complexity)]
     fn respond(
         &mut self,
         ctx: &AttemptCtx,
         wire: &mut Wire,
-    ) -> Result<(Vec<(Path, [u8; 32])>, Sealed<Vec<ResponsePart>>), Fault>;
+    ) -> Result<(Tagged, Sealed<Vec<ResponsePart>>), Fault>;
     /// Round 4. On reject: erase the attempt and open nothing. On accept: open `z_p`.
     fn open(
         &mut self,
@@ -81,10 +86,20 @@ pub enum Behavior {
     ShiftMask,
 }
 
-pub fn participation_binding(ctx: &AttemptCtx, path: &[u8], seed_commitment: &[u8; 32]) -> [u8; 32] {
+pub fn participation_binding(
+    ctx: &AttemptCtx,
+    path: &[u8],
+    seed_commitment: &[u8; 32],
+) -> [u8; 32] {
     let mut out = [0u8; 32];
     fips204::shake256(
-        &[b"cairn/participate/v1", &ctx.session, &[path.len() as u8], path, seed_commitment],
+        &[
+            b"cairn/participate/v1",
+            &ctx.session,
+            &[path.len() as u8],
+            path,
+            seed_commitment,
+        ],
         &mut out,
     );
     out
@@ -94,7 +109,14 @@ pub fn z_commitment(ctx: &AttemptCtx, path: &[u8], z: &[i32], salt: &[u8; 32]) -
     let bytes: Vec<u8> = z.iter().flat_map(|c| c.to_le_bytes()).collect();
     let mut out = [0u8; 32];
     fips204::shake256(
-        &[b"cairn/z-commit/v1", &ctx.session, &[path.len() as u8], path, &bytes, salt],
+        &[
+            b"cairn/z-commit/v1",
+            &ctx.session,
+            &[path.len() as u8],
+            path,
+            &bytes,
+            salt,
+        ],
         &mut out,
     );
     out
@@ -138,7 +160,12 @@ pub struct Signer {
 
 impl Signer {
     pub fn new(share: KeyShare, group: Arc<GroupPublic>) -> Self {
-        Self { share, group, behavior: Behavior::Honest, state: AttemptState::default() }
+        Self {
+            share,
+            group,
+            behavior: Behavior::Honest,
+            state: AttemptState::default(),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -147,7 +174,10 @@ impl Signer {
 
     fn silent(&self, round: Round) -> Result<(), Fault> {
         if self.behavior == Behavior::Offline || self.behavior == Behavior::SilentAt(round) {
-            return Err(Fault { culprit: Some(self.share.path.clone()), kind: FaultKind::Timeout(round) });
+            return Err(Fault {
+                culprit: Some(self.share.path.clone()),
+                kind: FaultKind::Timeout(round),
+            });
         }
         Ok(())
     }
@@ -158,22 +188,33 @@ impl Party for Signer {
         *self.share.path.last().expect("signer path is never empty")
     }
 
-    fn commit(&mut self, ctx: &AttemptCtx, wire: &mut Wire) -> Result<(Active, Vec<(Path, [u8; 32])>), Fault> {
+    fn commit(&mut self, ctx: &AttemptCtx, wire: &mut Wire) -> Result<(Active, Tagged), Fault> {
         self.state.erase();
         self.silent(Round::Commitment)?;
         let path = self.share.path.clone();
         let binding = participation_binding(ctx, &path, &self.group.seed_commitments[&path]);
-        wire.broadcast(Message::Commitment { header: ctx.header(&path), active: Active::Signer, binding });
+        wire.broadcast(Message::Commitment {
+            header: ctx.header(&path),
+            active: Active::Signer,
+            binding,
+        });
         Ok((Active::Signer, vec![(path, binding)]))
     }
 
-    fn seed_input(&mut self, _ctx: &AttemptCtx, wire: &mut Wire) -> Result<Sealed<Vec<SeedPart>>, Fault> {
+    fn seed_input(
+        &mut self,
+        _ctx: &AttemptCtx,
+        wire: &mut Wire,
+    ) -> Result<Sealed<Vec<SeedPart>>, Fault> {
         let mut k_share = self.share.k;
         if self.behavior == Behavior::BadSeedShare {
             k_share[0] = (k_share[0] + 1) % Q;
         }
         wire.engine_io(&self.share.path, 32 * 4);
-        Ok(Sealed::seal(vec![SeedPart { path: self.share.path.clone(), k_share }]))
+        Ok(Sealed::seal(vec![SeedPart {
+            path: self.share.path.clone(),
+            k_share,
+        }]))
     }
 
     fn challenge(
@@ -196,13 +237,19 @@ impl Party for Signer {
             .into_iter()
             .find(|(p, _)| p == &path)
             .map(|(_, w)| w)
-            .ok_or(Fault { culprit: None, kind: FaultKind::Unattributed })?;
+            .ok_or(Fault {
+                culprit: None,
+                kind: FaultKind::Unattributed,
+            })?;
         self.state.c_tilde = Some(*c_tilde);
         let mut echo = *c_tilde;
         if self.behavior == Behavior::WrongChallenge {
             echo[0] ^= 1;
         }
-        wire.broadcast(Message::Challenge { header: ctx.header(&path), c_tilde: echo.to_vec() });
+        wire.broadcast(Message::Challenge {
+            header: ctx.header(&path),
+            c_tilde: echo.to_vec(),
+        });
         Ok(echo)
     }
 
@@ -210,15 +257,21 @@ impl Party for Signer {
         &mut self,
         ctx: &AttemptCtx,
         wire: &mut Wire,
-    ) -> Result<(Vec<(Path, [u8; 32])>, Sealed<Vec<ResponsePart>>), Fault> {
+    ) -> Result<(Tagged, Sealed<Vec<ResponsePart>>), Fault> {
         self.silent(Round::MaskedResponse)?;
         let path = self.share.path.clone();
-        let c_tilde = self.state.c_tilde.ok_or(Fault { culprit: Some(path.clone()), kind: FaultKind::Timeout(Round::Challenge) })?;
+        let c_tilde = self.state.c_tilde.ok_or(Fault {
+            culprit: Some(path.clone()),
+            kind: FaultKind::Timeout(Round::Challenge),
+        })?;
         let c = sample_in_ball(&c_tilde);
         // The linear share arithmetic every signer does locally:
         //   z_p = y_p + c (w_p s1_p),   r_p = A y_p - c (w_p s2_p).
         let w = self.state.weight;
-        let z = vec_add(&self.state.y, &challenge_mul(&c, &vec_scale(&self.share.s1, w)));
+        let z = vec_add(
+            &self.state.y,
+            &challenge_mul(&c, &vec_scale(&self.share.s1, w)),
+        );
         let mut r = vec_sub(
             &mat_vec_coeff(self.group.a_hat(), &self.state.y),
             &challenge_mul(&c, &vec_scale(&self.share.s2, w)),
@@ -237,7 +290,10 @@ impl Party for Signer {
             header: ctx.header(&path),
             commitments: vec![(path.clone(), commitment)],
         });
-        Ok((vec![(path.clone(), commitment)], Sealed::seal(vec![ResponsePart { path, z, r }])))
+        Ok((
+            vec![(path.clone(), commitment)],
+            Sealed::seal(vec![ResponsePart { path, z, r }]),
+        ))
     }
 
     fn open(
@@ -251,7 +307,12 @@ impl Party for Signer {
         if !accept {
             // Rejected: erase y_p and z_p. Nothing about this attempt is ever opened.
             self.state.erase();
-            wire.broadcast(Message::HintCarry { header: ctx.header(&path), accept, openings: vec![], hint: None });
+            wire.broadcast(Message::HintCarry {
+                header: ctx.header(&path),
+                accept,
+                openings: vec![],
+                hint: None,
+            });
             return Ok(vec![]);
         }
         self.silent(Round::HintCarry)?;
@@ -259,7 +320,11 @@ impl Party for Signer {
         if self.behavior == Behavior::BadOpening {
             z[0] = (z[0] + 1) % Q;
         }
-        let opening = Opening { path: path.clone(), z, salt: self.state.salt };
+        let opening = Opening {
+            path: path.clone(),
+            z,
+            salt: self.state.salt,
+        };
         self.state.erase();
         wire.broadcast(Message::HintCarry {
             header: ctx.header(&path),
@@ -297,7 +362,12 @@ pub struct Committee<P> {
 
 impl<P: Party> Committee<P> {
     /// `path` is this committee's position in the tower (empty for the root).
-    pub fn new(group: Arc<GroupPublic>, path: Path, threshold: usize, members: Vec<P>) -> Result<Self, ShapeError> {
+    pub fn new(
+        group: Arc<GroupPublic>,
+        path: Path,
+        threshold: usize,
+        members: Vec<P>,
+    ) -> Result<Self, ShapeError> {
         let gadget = Gadget::new(threshold, members.len())?;
         Ok(Self {
             group,
@@ -355,7 +425,7 @@ impl<P: Party> Party for Committee<P> {
         self.path.last().copied().unwrap_or(0)
     }
 
-    fn commit(&mut self, ctx: &AttemptCtx, wire: &mut Wire) -> Result<(Active, Vec<(Path, [u8; 32])>), Fault> {
+    fn commit(&mut self, ctx: &AttemptCtx, wire: &mut Wire) -> Result<(Active, Tagged), Fault> {
         self.active.clear();
         self.commitments.clear();
         let live = self.live();
@@ -372,13 +442,20 @@ impl<P: Party> Party for Committee<P> {
             let result = self.members[pos].commit(ctx, wire).and_then(|(active, b)| {
                 // A signer's binding must match its public seed-share commitment.
                 let ok = active != Active::Signer
-                    || self.group.seed_commitments.get(&child_path).is_some_and(|sc| {
-                        b.len() == 1 && b[0].1 == participation_binding(ctx, &child_path, sc)
-                    });
+                    || self
+                        .group
+                        .seed_commitments
+                        .get(&child_path)
+                        .is_some_and(|sc| {
+                            b.len() == 1 && b[0].1 == participation_binding(ctx, &child_path, sc)
+                        });
                 if ok {
                     Ok((active, b))
                 } else {
-                    Err(Fault { culprit: Some(child_path.clone()), kind: FaultKind::BadBinding })
+                    Err(Fault {
+                        culprit: Some(child_path.clone()),
+                        kind: FaultKind::BadBinding,
+                    })
                 }
             });
             match result {
@@ -398,20 +475,38 @@ impl<P: Party> Party for Committee<P> {
         }
         if children.len() < self.gadget.t as usize {
             self.active.clear();
-            return Err(Fault { culprit: Some(self.path.clone()), kind: FaultKind::Timeout(Round::Commitment) });
+            return Err(Fault {
+                culprit: Some(self.path.clone()),
+                kind: FaultKind::Timeout(Round::Commitment),
+            });
         }
         let active = Active::Committee(children);
         let mut binding = [0u8; 32];
         let flat: Vec<u8> = bindings.iter().flat_map(|(_, b)| *b).collect();
-        fips204::shake256(&[b"cairn/tier-binding/v1", &ctx.session, &flat], &mut binding);
-        wire.broadcast(Message::Commitment { header: ctx.header(&self.path), active: active.clone(), binding });
+        fips204::shake256(
+            &[b"cairn/tier-binding/v1", &ctx.session, &flat],
+            &mut binding,
+        );
+        wire.broadcast(Message::Commitment {
+            header: ctx.header(&self.path),
+            active: active.clone(),
+            binding,
+        });
         Ok((active, bindings))
     }
 
-    fn seed_input(&mut self, ctx: &AttemptCtx, wire: &mut Wire) -> Result<Sealed<Vec<SeedPart>>, Fault> {
+    fn seed_input(
+        &mut self,
+        ctx: &AttemptCtx,
+        wire: &mut Wire,
+    ) -> Result<Sealed<Vec<SeedPart>>, Fault> {
         let mut parts = Vec::new();
         for &pos in &self.active.clone() {
-            parts.push(self.members[pos].seed_input(ctx, wire).inspect_err(|f| self.observe(f, wire))?);
+            parts.push(
+                self.members[pos]
+                    .seed_input(ctx, wire)
+                    .inspect_err(|f| self.observe(f, wire))?,
+            );
         }
         Ok(Sealed::merge(parts))
     }
@@ -432,10 +527,16 @@ impl<P: Party> Party for Committee<P> {
                 .challenge(ctx, root, share, c_tilde, wire)
                 .inspect_err(|f| self.observe(f, wire))?;
             if &echo != c_tilde {
-                return Err(Fault { culprit: Some(child), kind: FaultKind::ChallengeMismatch });
+                return Err(Fault {
+                    culprit: Some(child),
+                    kind: FaultKind::ChallengeMismatch,
+                });
             }
         }
-        wire.broadcast(Message::Challenge { header: ctx.header(&self.path), c_tilde: c_tilde.to_vec() });
+        wire.broadcast(Message::Challenge {
+            header: ctx.header(&self.path),
+            c_tilde: c_tilde.to_vec(),
+        });
         Ok(*c_tilde)
     }
 
@@ -443,15 +544,20 @@ impl<P: Party> Party for Committee<P> {
         &mut self,
         ctx: &AttemptCtx,
         wire: &mut Wire,
-    ) -> Result<(Vec<(Path, [u8; 32])>, Sealed<Vec<ResponsePart>>), Fault> {
+    ) -> Result<(Tagged, Sealed<Vec<ResponsePart>>), Fault> {
         let (mut commitments, mut parts) = (Vec::new(), Vec::new());
         for &pos in &self.active.clone() {
-            let (c, p) = self.members[pos].respond(ctx, wire).inspect_err(|f| self.observe(f, wire))?;
+            let (c, p) = self.members[pos]
+                .respond(ctx, wire)
+                .inspect_err(|f| self.observe(f, wire))?;
             commitments.extend(c);
             parts.push(p);
         }
         self.commitments = commitments.iter().cloned().collect();
-        wire.broadcast(Message::MaskedResponse { header: ctx.header(&self.path), commitments: commitments.clone() });
+        wire.broadcast(Message::MaskedResponse {
+            header: ctx.header(&self.path),
+            commitments: commitments.clone(),
+        });
         Ok((commitments, Sealed::merge(parts)))
     }
 
@@ -465,13 +571,19 @@ impl<P: Party> Party for Committee<P> {
         let mut openings = Vec::new();
         for &pos in &self.active.clone() {
             let child = self.child_path(self.members[pos].index());
-            let opened = self.members[pos].open(ctx, accept, hint, wire).inspect_err(|f| self.observe(f, wire))?;
+            let opened = self.members[pos]
+                .open(ctx, accept, hint, wire)
+                .inspect_err(|f| self.observe(f, wire))?;
             for o in &opened {
                 // Each committee checks its own signers' openings against their commitments.
                 if self.is_child(&o.path)
-                    && self.commitments.get(&o.path) != Some(&z_commitment(ctx, &o.path, &o.z, &o.salt))
+                    && self.commitments.get(&o.path)
+                        != Some(&z_commitment(ctx, &o.path, &o.z, &o.salt))
                 {
-                    return Err(Fault { culprit: Some(child), kind: FaultKind::BadOpening });
+                    return Err(Fault {
+                        culprit: Some(child),
+                        kind: FaultKind::BadOpening,
+                    });
                 }
             }
             openings.extend(opened);
@@ -510,7 +622,10 @@ impl<P: Party> Party for Committee<P> {
             return true;
         }
         let deeper = n / live.len() as u32;
-        self.members.iter_mut().find(|m| m.index() == pick).is_some_and(|m| m.probe(deeper))
+        self.members
+            .iter_mut()
+            .find(|m| m.index() == pick)
+            .is_some_and(|m| m.probe(deeper))
     }
 
     fn reset(&mut self) {

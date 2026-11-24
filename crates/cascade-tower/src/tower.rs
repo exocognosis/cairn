@@ -13,8 +13,8 @@ use crate::params::TowerParams;
 use rand::{CryptoRng, Rng};
 use std::sync::Arc;
 use threshold_mldsa::{
-    deal, sign, AttemptEngine, Committee, GroupPublic, Party, ShapeError, SignError, SignPolicy, Signed, Signer,
-    PUBLIC_KEY_BYTES,
+    deal, sign, AttemptEngine, Committee, GroupPublic, Party, ShapeError, SignError, SignPolicy,
+    Signed, Signer, PUBLIC_KEY_BYTES,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -36,7 +36,11 @@ pub struct Tower {
 impl Tower {
     /// Trusted-dealer setup: derive the ML-DSA-65 key from `seed`, share it down the tower and
     /// build every signer in this process. See DECISIONS.md D-04 for what a deployment replaces.
-    pub fn deal<R: Rng + CryptoRng>(seed: &[u8; 32], params: &TowerParams, rng: &mut R) -> Result<Self, TowerError> {
+    pub fn deal<R: Rng + CryptoRng>(
+        seed: &[u8; 32],
+        params: &TowerParams,
+        rng: &mut R,
+    ) -> Result<Self, TowerError> {
         let [root_g, leaf_g] = params.tiers() else {
             return Err(TowerError::NotTwoTier(params.tiers().len()));
         };
@@ -49,10 +53,19 @@ impl Tower {
             while let Some(share) = shares.next_if(|s| s.path[0] == leaf) {
                 signers.push(Signer::new(share, group.clone()));
             }
-            leaves.push(Committee::new(group.clone(), vec![leaf], leaf_g.t as usize, signers)?);
+            leaves.push(Committee::new(
+                group.clone(),
+                vec![leaf],
+                leaf_g.t as usize,
+                signers,
+            )?);
         }
         let root = Committee::new(group.clone(), vec![], root_g.t as usize, leaves)?;
-        Ok(Self { params: params.clone(), group, root })
+        Ok(Self {
+            params: params.clone(),
+            group,
+            root,
+        })
     }
 
     pub fn params(&self) -> &TowerParams {

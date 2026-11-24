@@ -38,10 +38,21 @@ impl AttemptCtx {
     pub fn new(pk: &[u8], mu: [u8; 64], attempt: u32, retry: u32) -> Self {
         let mut session = [0u8; 32];
         fips204::shake256(
-            &[b"cairn/session/v1", pk, &mu, &attempt.to_be_bytes(), &retry.to_be_bytes()],
+            &[
+                b"cairn/session/v1",
+                pk,
+                &mu,
+                &attempt.to_be_bytes(),
+                &retry.to_be_bytes(),
+            ],
             &mut session,
         );
-        Self { session, attempt, retry, mu }
+        Self {
+            session,
+            attempt,
+            retry,
+            mu,
+        }
     }
 
     pub fn header(&self, sender: &[u8]) -> Header {
@@ -103,11 +114,29 @@ pub struct Opening {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
-    Commitment { header: Header, active: Active, binding: [u8; 32] },
-    Challenge { header: Header, c_tilde: Vec<u8> },
-    MaskedResponse { header: Header, commitments: Vec<(Path, [u8; 32])> },
-    HintCarry { header: Header, accept: bool, openings: Vec<Opening>, hint: Option<Vec<u16>> },
-    Abort { header: Header, fault: Fault },
+    Commitment {
+        header: Header,
+        active: Active,
+        binding: [u8; 32],
+    },
+    Challenge {
+        header: Header,
+        c_tilde: Vec<u8>,
+    },
+    MaskedResponse {
+        header: Header,
+        commitments: Vec<(Path, [u8; 32])>,
+    },
+    HintCarry {
+        header: Header,
+        accept: bool,
+        openings: Vec<Opening>,
+        hint: Option<Vec<u16>>,
+    },
+    Abort {
+        header: Header,
+        fault: Fault,
+    },
 }
 
 impl Message {
@@ -159,7 +188,10 @@ pub struct Wire {
 
 impl Wire {
     pub fn new(round_timeout: Duration) -> Self {
-        Self { round_timeout, ..Self::default() }
+        Self {
+            round_timeout,
+            ..Self::default()
+        }
     }
 
     /// Broadcast: encode, decode (the receiver's view) and account.
@@ -167,7 +199,10 @@ impl Wire {
         let bytes = msg.encode();
         let received = Message::decode(&bytes).expect("codec round trip");
         debug_assert_eq!(received, msg);
-        *self.bytes_sent.entry(msg.header().sender.clone()).or_default() += bytes.len() as u64;
+        *self
+            .bytes_sent
+            .entry(msg.header().sender.clone())
+            .or_default() += bytes.len() as u64;
         self.messages += 1;
         if self.record {
             self.transcript.push(msg);
