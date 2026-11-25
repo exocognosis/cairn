@@ -340,7 +340,15 @@ fn stock_pqc_sidecar_signs_through_a_three_round_committee() {
         |name: &str| Stdio::from(std::fs::File::create(work.join(format!("{name}.log"))).unwrap());
     let _kms = Kill(
         Command::new(CAIRN)
-            .args(["serve-kms", "--listen", &kms, "--peers"])
+            .args([
+                "serve-kms",
+                "--listen",
+                &kms,
+                "--access-key-id",
+                "local",
+                "--peers",
+            ])
+            .env("CAIRN_KMS_SECRET_ACCESS_KEY", "local")
             .arg(&committee.peers_file)
             .arg("--committee")
             .arg(&committee.committee_file)
@@ -407,6 +415,25 @@ fn stock_pqc_sidecar_signs_through_a_three_round_committee() {
     );
     let pk = hex::decode(std::fs::read_to_string(&pk_file).unwrap().trim()).unwrap();
     assert_eq!(pk, committee.key.pk);
+
+    // The endpoint checks the request signature: the same call with another secret is refused.
+    let denied = Command::new(&sidecar)
+        .args([
+            "kms-public-key",
+            "--config",
+            config.to_str().unwrap(),
+            "--public-key-out",
+        ])
+        .arg(work.join("denied.hex"))
+        .env("AWS_ACCESS_KEY_ID", "local")
+        .env("AWS_SECRET_ACCESS_KEY", "not-the-secret")
+        .env("AWS_EC2_METADATA_DISABLED", "true")
+        .output()
+        .unwrap();
+    assert!(
+        !denied.status.success(),
+        "a request signed with the wrong secret must be refused"
+    );
 
     let daemon = Kill(
         stock(&["--config", config.to_str().unwrap()])

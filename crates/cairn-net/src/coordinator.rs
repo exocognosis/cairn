@@ -79,6 +79,8 @@ pub enum NetFaultKind {
     InconsistentResponse,
     /// The attempt failed and no single node can be named.
     Unattributed(String),
+    /// A party's signing policy refused the message.
+    Policy(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +115,8 @@ pub enum NetError {
     Stalled(Vec<NetFault>),
     #[error("rejection limit reached")]
     RejectionLimit,
+    #[error("refused by signing policy: {0}")]
+    Policy(String),
 }
 
 pub struct Coordinator {

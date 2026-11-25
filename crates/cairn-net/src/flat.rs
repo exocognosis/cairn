@@ -19,7 +19,8 @@
 //! execution fail (by relaying inconsistently) but cannot make a party reuse a mask.
 
 use crate::coordinator::{NetError, NetFault, NetFaultKind, NetPolicy, NetReport};
-use crate::node::{FaultMode, Peers, CHECKPOINT_DOMAIN};
+use crate::node::{FaultMode, Peers};
+use crate::policy::Policy;
 use crate::tls::{ClusterTls, TlsIdentity};
 use crate::transport::{call, serve, CallError, Handler, Link, Pool, Reply};
 use crate::wire::{Body, Frame, NodeId, NET_VERSION};
@@ -54,6 +55,7 @@ pub struct PartyNode {
     pub fault: FaultMode,
     sessions: Mutex<HashMap<[u8; 32], PartySession>>,
     presigns: Mutex<std::collections::VecDeque<Presigned>>,
+    policy: Mutex<Policy>,
 }
 
 const MAX_SESSIONS: usize = 64;
@@ -65,7 +67,13 @@ fn refused(reason: &str) -> Body {
 }
 
 impl PartyNode {
-    pub fn new(id: NodeId, key: Arc<GroupKey>, share: PartyKey, fault: FaultMode) -> Self {
+    pub fn new(
+        id: NodeId,
+        key: Arc<GroupKey>,
+        share: PartyKey,
+        fault: FaultMode,
+        policy: Policy,
+    ) -> Self {
         Self {
             id,
             key,
@@ -73,6 +81,7 @@ impl PartyNode {
             fault,
             sessions: Mutex::new(HashMap::new()),
             presigns: Mutex::default(),
+            policy: Mutex::new(policy),
         }
     }
 
@@ -95,8 +104,13 @@ impl PartyNode {
                 presign,
                 commitments,
             } => {
-                if !message.starts_with(CHECKPOINT_DOMAIN) {
-                    return refused("not a checkpoint message");
+                if let Err(reason) = self
+                    .policy
+                    .lock()
+                    .expect("policy")
+                    .authorize(&message, &session)
+                {
+                    return Body::PolicyRefused { reason };
                 }
                 // Take the masks out of the pool: they can serve this one session only.
                 let taken = {
@@ -287,6 +301,7 @@ impl FlatCoordinator {
                 r.exchanges += 1;
                 match x.reply.body {
                     Body::Refused { reason } => Err(fault(to, NetFaultKind::Refused(reason))),
+                    Body::PolicyRefused { reason } => Err(fault(to, NetFaultKind::Policy(reason))),
                     body => Ok(body),
                 }
             }
@@ -565,6 +580,13 @@ impl FlatCoordinator {
                     }
                 }
                 Err(faults) => {
+                    // A policy refusal is the parties doing their job: report it, exclude nobody.
+                    if let Some(reason) = faults.iter().find_map(|f| match &f.kind {
+                        NetFaultKind::Policy(reason) => Some(reason.clone()),
+                        _ => None,
+                    }) {
+                        return Err(NetError::Policy(reason));
+                    }
                     for f in &faults {
                         match f.culprit {
                             Some(id) => {
@@ -669,7 +691,7 @@ impl LocalCommittee {
                 .find(|(f, _)| *f == id)
                 .map(|(_, m)| *m)
                 .unwrap_or_default();
-            let node = PartyNode::new(id, key.clone(), party, fault);
+            let node = PartyNode::new(id, key.clone(), party, fault, Policy::ephemeral(&key.pk));
             tasks.push(tokio::spawn(run_party(
                 listener,
                 node,

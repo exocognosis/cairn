@@ -252,3 +252,10 @@ do not compress, and each party must see every other party's openings to check c
 The remaining levers are placement (a coordinator near the parties, direct connections instead
 of one tunnel) and fewer repetitions per execution, which is a parameter question for the
 paper's analysis, not an engineering one.
+
+## Update: first hardening pass
+
+Without funding for review, the work now follows [BLOCKERS.md](BLOCKERS.md), which lists every
+known blocker and its status. Done in this pass: SigV4 verification on the KMS endpoint and a
+loopback-only rule without credentials; a signing policy enforced by each party with
+persisted protection against conflicting or older checkpoints; audit logs.

@@ -3,15 +3,30 @@
 use cairn_net::transport::call;
 use cairn_net::{
     Body, FaultMode, FlatCoordinator, Frame, Link, LocalCommittee, NetError, NetFaultKind,
-    NetPolicy, NodeId, CHECKPOINT_DOMAIN,
+    NetPolicy, NodeId,
 };
 use std::time::{Duration, Instant};
 use threshold_mldsa::fips204;
 
 const TIMEOUT: Duration = Duration::from_millis(1500);
 
-fn message(tag: &str) -> Vec<u8> {
-    [CHECKPOINT_DOMAIN, tag.as_bytes()].concat()
+/// A well-formed checkpoint for the committee key `pk` at `height`; `tag` varies the block.
+fn checkpoint(pk: &[u8], height: u64, tag: &str) -> Vec<u8> {
+    cairn_net::policy::Checkpoint {
+        chain: "cosmos:cairn-test-1".into(),
+        epoch: 1,
+        height,
+        block_hash: fips204_hash(tag),
+        finality_commitment: vec![7; 32],
+        key_id: cairn_net::policy::key_id(pk),
+    }
+    .message()
+}
+
+fn fips204_hash(tag: &str) -> Vec<u8> {
+    let mut out = [0u8; 32];
+    fips204::shake256(&[tag.as_bytes()], &mut out);
+    out.to_vec()
 }
 
 async fn committee(
@@ -40,8 +55,8 @@ async fn committee(
 async fn committees_sign_standard_signatures_over_the_network() {
     for (t, n) in [(2, 3), (3, 4)] {
         let (_committee, mut coordinator) = committee(t, n, &[]).await;
-        for tag in ["a", "b"] {
-            let msg = message(tag);
+        for (height, tag) in [(100, "a"), (200, "b")] {
+            let msg = checkpoint(&coordinator.key().pk, height, tag);
             let (signature, report) = coordinator.sign(&msg).await.unwrap();
             assert!(
                 fips204::verify_standard(&coordinator.key().pk, &msg, &signature),
@@ -67,7 +82,7 @@ async fn committees_sign_standard_signatures_over_the_network() {
 async fn stalled_party_is_replaced_by_the_spare() {
     let (_committee, mut coordinator) =
         committee(3, 4, &[(NodeId::Party(2), FaultMode::Stall)]).await;
-    let msg = message("stall");
+    let msg = checkpoint(&coordinator.key().pk, 100, "stall");
     let start = Instant::now();
     let (signature, report) = coordinator.sign(&msg).await.unwrap();
     assert!(start.elapsed() >= TIMEOUT, "the deadline is wall-clock");
@@ -89,7 +104,7 @@ async fn stalled_party_is_replaced_by_the_spare() {
 async fn a_wrong_response_is_detected_and_rotated_away() {
     let (_committee, mut coordinator) =
         committee(3, 4, &[(NodeId::Party(1), FaultMode::BadResponse)]).await;
-    let msg = message("bad");
+    let msg = checkpoint(&coordinator.key().pk, 100, "bad");
     let (signature, report) = coordinator.sign(&msg).await.unwrap();
     assert!(fips204::verify_standard(
         &coordinator.key().pk,
@@ -115,11 +130,41 @@ async fn too_few_parties_is_an_error_and_other_messages_are_refused() {
         (NodeId::Party(2), FaultMode::Stall),
     ];
     let (_committee, mut coordinator) = committee(3, 4, &stalled).await;
-    let err = coordinator.sign(&message("quorum")).await.err().unwrap();
+    let msg = checkpoint(&coordinator.key().pk, 100, "quorum");
+    let err = coordinator.sign(&msg).await.err().unwrap();
     assert!(matches!(err, NetError::QuorumLost(..)), "{err}");
+}
 
+#[tokio::test(flavor = "multi_thread")]
+async fn parties_enforce_their_own_signing_policy() {
     let (_committee, mut coordinator) = committee(2, 3, &[]).await;
-    assert!(coordinator.sign(b"transfer all funds").await.is_err());
+    let pk = coordinator.key().pk;
+    let policy = |r: Result<_, NetError>| matches!(r, Err(NetError::Policy(_)));
+    // Not a checkpoint; a checkpoint for another key.
+    assert!(policy(coordinator.sign(b"transfer all funds").await));
+    assert!(policy(
+        coordinator
+            .sign(&checkpoint(b"some other key", 100, "x"))
+            .await
+    ));
+    // A checkpoint, then a conflicting one at the same height, then an older height.
+    let first = checkpoint(&pk, 500, "block A");
+    assert!(coordinator.sign(&first).await.is_ok());
+    assert!(
+        policy(coordinator.sign(&checkpoint(&pk, 500, "block B")).await),
+        "two checkpoints at one height"
+    );
+    assert!(policy(
+        coordinator.sign(&checkpoint(&pk, 499, "older")).await
+    ));
+    // The same checkpoint again is fine (a retry), and so is the next height. A refusal
+    // excludes nobody.
+    assert!(coordinator.sign(&first).await.is_ok());
+    assert!(coordinator
+        .sign(&checkpoint(&pk, 501, "next"))
+        .await
+        .is_ok());
+    assert!(coordinator.excluded().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -152,7 +197,7 @@ async fn a_party_answers_a_session_once() {
         ids.insert(p, id);
     }
     let m2 = |p: u8| Body::M2 {
-        message: message("once"),
+        message: checkpoint(&committee.key.pk, 100, "once"),
         presign: ids[&p],
         commitments: commitments.clone(),
     };

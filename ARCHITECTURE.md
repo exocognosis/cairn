@@ -396,6 +396,20 @@ session's masks when it answers round 3, and precomputed masks leave the pool at
 `T` remain. A wrong response is detected (the summed response fails the signing equation) but
 the protocol cannot say whose it was, so the coordinator rotates the active set.
 
+**Signing policy.** Before round 2 a party decides for itself whether to sign
+(`cairn-net::policy`). The message must parse as a pqc-sidecar checkpoint, name this
+committee's key, be on a served chain if a list is configured, and not conflict with what the
+party already signed: no lower height on that chain, and no different checkpoint at the same
+height. The last signed height and digest per chain are written to the party's state file
+before it reveals anything. A refusal is reported as `PolicyRefused`; the coordinator returns
+it to the caller and excludes nobody. Since `T` parties must each agree, two conflicting
+checkpoints at one height cannot both be signed unless a party's state is lost or rolled back.
+
+**Request authentication.** `cairn serve-kms` verifies AWS Signature Version 4 on each request
+when given credentials (`cairn-sidecar::sigv4`): credential scope, signed headers including
+`host` and `x-amz-date`, the body hash, and a five-minute clock window. Without credentials it
+binds loopback only. The hop is authenticated but not encrypted.
+
 **Differences from the tower path.** The mask is sampled, not `ExpandMask`, so signatures are
 valid but not deterministic. Security rests on the paper's argument (dishonest majority, up to
 `T - 1` corruptions), which this prototype has not been checked against in detail. Key

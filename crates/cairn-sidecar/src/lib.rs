@@ -12,6 +12,7 @@ pub mod certificate;
 pub mod certifier;
 pub mod cluster;
 pub mod kms;
+pub mod sigv4;
 
 pub use certificate::{key_id, Certificate, CertificateError, Checkpoint};
 pub use certifier::{

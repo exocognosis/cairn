@@ -11,6 +11,7 @@ pub mod cluster;
 pub mod coordinator;
 pub mod flat;
 pub mod node;
+pub mod policy;
 pub mod tls;
 pub mod transport;
 pub mod wire;

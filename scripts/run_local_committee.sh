@@ -26,7 +26,8 @@ trap 'kill "${PIDS[@]}" 2>/dev/null || true' EXIT INT TERM
 for k in $(seq "$N"); do
   "$CAIRN" node --role party --id "party_$k" --bind "127.0.0.1:$((BASE + k - 1))" \
     --peers "$DIR/keys/peers.json" --committee "$DIR/keys/committee.bin" --tls "$DIR/keys/tls" \
-    --share "$DIR/keys/party_$k.share" --link-delay-ms $((RTT / 2)) 2> "$DIR/logs/party_$k.log" & PIDS+=($!)
+    --share "$DIR/keys/party_$k.share" --state "$DIR/party_$k.state.json" \
+    --audit-log "$DIR/logs/party_$k.audit.log" --link-delay-ms $((RTT / 2)) 2> "$DIR/logs/party_$k.log" & PIDS+=($!)
 done
 "$CAIRN" serve-kms --listen "127.0.0.1:$KMS" --peers "$DIR/keys/peers.json" \
   --committee "$DIR/keys/committee.bin" --tls "$DIR/keys/tls" \

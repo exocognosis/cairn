@@ -390,3 +390,28 @@ before any request and bound to a message at round 2. The paper notes round 1 is
 of the message and signing set. Revealing openings before the message is fixed would save
 another round trip but is outside the paper's argument, so it is not done. A party keeps at
 most 16 unused mask sets and drops the oldest.
+
+# Hardening without an audit
+
+**D-77. The KMS endpoint verifies SigV4.** pqc-sidecar already signs every request with its AWS
+credentials, so checking that signature authenticates callers with no change to the sidecar.
+Verified against the real AWS client in the live test, including a wrong-secret refusal.
+
+**D-78. No unauthenticated endpoint beyond loopback.** Without credentials `serve-kms` refuses
+to bind a non-loopback address. A misconfiguration should fail closed, not expose signing.
+
+**D-79. Policy is enforced by each party, not the coordinator.** Parties parse the checkpoint
+and keep their own last-signed height on disk, written before they reveal. This is the
+equivalent of a validator's double-sign protection. It supports checkpoint messages only;
+general-purpose signing would need a policy language and is not attempted.
+
+**D-80. Policy refusals do not exclude parties.** A refusal is correct behaviour, so the
+coordinator reports it to the caller and leaves the committee as it was.
+
+**D-81. Audit logs are plain JSON lines.** One per decision at each party, one per request at
+the coordinator. No log shipping or tamper evidence; that belongs to the operator's tooling.
+
+**D-82. Order of work without funding.** docs/BLOCKERS.md lists every known blocker with
+status. Outside review and standards status cannot be bought with engineering; everything else
+is taken in the order that removes the most risk per unit of work, starting with what an
+operator would trip over first.

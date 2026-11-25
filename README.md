@@ -104,6 +104,11 @@ include all of the cryptography; there is nothing left to substitute.
 cargo run --release -p cairn-sidecar -- mithril-demo --threshold 3 --parties 4
 ```
 
+Safeguards an operator gets today: every party checks the checkpoint itself and will not sign
+for another key, an unlisted chain, a lower height, or a second checkpoint at one height (kept
+on disk across restarts); the KMS endpoint verifies AWS SigV4 request signatures and refuses to
+listen beyond loopback without credentials; parties and the coordinator write audit logs.
+
 **It is a prototype, not a secure implementation**: written from the paper without comparison
 against the authors' code, floating-point sampling, a trusted dealer, not constant time, and
 measured across hosts only once, on one link. Cost also rises steeply with the threshold, so small thresholds are the
@@ -145,6 +150,7 @@ the live sidecar flow and two-host deployment.
 | Short answers to common questions | [docs/FAQ.md](docs/FAQ.md) |
 | The protocol, message by message | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | Why each design choice was made (65 entries) | [DECISIONS.md](DECISIONS.md) |
+| Everything that still blocks production use, with status | [docs/BLOCKERS.md](docs/BLOCKERS.md) |
 | What is planned and what funding would buy | [ROADMAP.md](ROADMAP.md) |
 | The gap to a production BLS replacement, and recent related work | [docs/PRODUCTION_PATH.md](docs/PRODUCTION_PATH.md) |
 | Running it on two machines | [DEPLOY_SPLIT.md](DEPLOY_SPLIT.md) |

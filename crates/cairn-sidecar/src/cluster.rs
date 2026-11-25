@@ -450,8 +450,29 @@ impl KmsSigner for CommitteeSigner {
     }
 
     fn sign(&mut self, message: &[u8]) -> Result<[u8; SIGNATURE_BYTES], String> {
-        self.sign_with_report(message)
-            .map(|(signature, _)| signature)
+        let outcome = self.sign_with_report(message);
+        // One audit line per request on stderr: what was asked, who signed, what it took.
+        let checkpoint = cairn_net::policy::Checkpoint::parse(message);
+        let line = match &outcome {
+            Ok((_, report)) => serde_json::json!({
+                "event": "signed",
+                "chain": checkpoint.as_ref().map(|c| c.chain.clone()),
+                "height": checkpoint.as_ref().map(|c| c.height),
+                "signers": report.signers.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "executions": report.rejections + 1,
+                "fault_retries": report.retries,
+                "faults": report.faults.iter().map(|f| format!("{f:?}")).collect::<Vec<_>>(),
+                "elapsed_ms": report.elapsed.as_millis() as u64,
+            }),
+            Err(reason) => serde_json::json!({
+                "event": "not_signed",
+                "chain": checkpoint.as_ref().map(|c| c.chain.clone()),
+                "height": checkpoint.as_ref().map(|c| c.height),
+                "reason": reason,
+            }),
+        };
+        eprintln!("{line}");
+        outcome.map(|(signature, _)| signature)
     }
 }
 
@@ -525,6 +546,10 @@ impl ProcessCommittee {
                     .arg(&committee.tls_dir)
                     .arg("--share")
                     .arg(party_share_file(&keys, *id))
+                    .arg("--state")
+                    .arg(dir.join(format!("{id}.state.json")))
+                    .arg("--audit-log")
+                    .arg(dir.join(format!("{id}.audit.log")))
                     .args(["--fault", fault_name(fault)])
                     .args(["--link-delay-ms", &link_delay_ms.to_string()])
                     .args(["--round-timeout-ms", &round_timeout_ms.to_string()])

@@ -20,6 +20,8 @@ base64.workspace = true
 cairn-net = { path = "../cairn-net" }
 cascade-tower = { path = "../cascade-tower" }
 hex.workspace = true
+hmac.workspace = true
+sha2.workspace = true
 mpc-bridge = { path = "../mpc-bridge" }
 rand.workspace = true
 serde_json.workspace = true

@@ -41,6 +41,10 @@ Multi-process cluster:
   cairn keygen --out <dir> --committee <T-of-N>      (flat committee, three-round protocol)
   cairn node --role party --id party_<k> --bind <addr:port> --peers <peers.json>
              --committee <committee.bin> --tls <dir> --share <file>
+             [--state <file>] [--audit-log <file>] [--chains <caip2,caip2>]
+      A party signs only well-formed checkpoints for its committee key, on the listed chains
+      if given, never below its last signed height and never two at one height (kept in
+      --state across restarts).
   cairn serve-kms --committee <committee.bin> --peers <peers.json> --tls <dir> [--listen ...]
   cairn committee-bench [--committees 2-of-3,3-of-4] [--signatures <n>] [--rtt-ms <a,b>]
   cairn mpc-worker --socket-dir <dir>
@@ -48,6 +52,9 @@ Multi-process cluster:
   cairn serve-kms [--listen <addr:port>] [--public-key-out <file>]
                   [--peers <peers.json> --group <group.bin> --tls <dir>]   (sign through a cluster)
                   [--round-timeout-ms <n>] [--mpc-timeout-ms <n>] [--link-delay-ms <n>]
+                  [--access-key-id <id> --secret-access-key-file <file>]
+      Requests must be signed (AWS SigV4) with those credentials; the secret may also come
+      from CAIRN_KMS_SECRET_ACCESS_KEY. Without credentials the endpoint binds loopback only.
       KMS-compatible endpoint for pqc-sidecar's aws_kms backend. Without --peers the tower runs
       inside this process.
   cairn mock-chain [--listen <addr:port>] [--chain-id <id>] [--height <n>]
@@ -96,6 +103,23 @@ fn verify_files(cert: &std::path::Path, pk: &std::path::Path) -> Result<serde_js
         "finality_commitment": hex::encode_upper(&c.finality_commitment),
         "key_id": hex::encode(certificate.key_id),
     }))
+}
+
+/// A well-formed checkpoint for benchmarks. Heights follow the clock so that repeated runs
+/// against the same committee never go backwards.
+fn bench_checkpoint(pk: &[u8], i: u32) -> Vec<u8> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    cairn_net::policy::Checkpoint {
+        chain: "cosmos:cairn-bench-1".into(),
+        epoch: 1,
+        height: now * 1000 + i as u64,
+        block_hash: rand::random::<[u8; 32]>().to_vec(),
+        finality_commitment: rand::random::<[u8; 32]>().to_vec(),
+        key_id: cairn_net::policy::key_id(pk),
+    }
+    .message()
 }
 
 fn ms(args: &[String], name: &str, default: u64) -> Result<u64, String> {
@@ -236,6 +260,25 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("serve-kms") => {
             let listen = arg(args, "--listen").unwrap_or_else(|| "127.0.0.1:8200".into());
             let pk_out = arg(args, "--public-key-out").map(PathBuf::from);
+            // Credentials callers must sign requests with (AWS SigV4), as pqc-sidecar does.
+            let auth = match arg(args, "--access-key-id") {
+                Some(id) => {
+                    let secret = match arg(args, "--secret-access-key-file") {
+                        Some(file) => std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?.trim().to_owned(),
+                        None => std::env::var("CAIRN_KMS_SECRET_ACCESS_KEY").map_err(|_| {
+                            "--access-key-id needs --secret-access-key-file or CAIRN_KMS_SECRET_ACCESS_KEY"
+                        })?,
+                    };
+                    if secret.is_empty() {
+                        return Err("the KMS secret access key is empty".into());
+                    }
+                    Some(cairn_sidecar::sigv4::KmsAuth::new(id, secret))
+                }
+                None => {
+                    eprintln!("cairn: KMS requests are NOT authenticated (no --access-key-id); loopback only");
+                    None
+                }
+            };
             let endpoint = match peers(args)? {
                 Some(peers) if arg(args, "--committee").is_some() => {
                     let file = arg(args, "--committee").ok_or("--committee <committee.bin>")?;
@@ -262,7 +305,7 @@ fn run(args: &[String]) -> Result<(), String> {
                         tls(args, NodeId::Coordinator)?,
                     )
                     .map_err(|e| e.to_string())?;
-                    kms::serve(&listen, signer)
+                    kms::serve_with(&listen, signer, auth.clone())
                 }
                 Some(peers) => {
                     let file = arg(args, "--group").ok_or("--peers needs --group <group.bin>")?;
@@ -284,7 +327,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     let signer =
                         ClusterSigner::new(group, peers, policy, tls(args, NodeId::Coordinator)?)
                             .map_err(|e| e.to_string())?;
-                    kms::serve(&listen, signer)
+                    kms::serve_with(&listen, signer, auth.clone())
                 }
                 None => {
                     let tower = Tower::deal(&seed(args)?, &params, &mut OsRng)
@@ -298,7 +341,7 @@ fn run(args: &[String]) -> Result<(), String> {
                         write_public_key(path, certifier.public_key())
                             .map_err(|e| e.to_string())?;
                     }
-                    kms::serve(&listen, certifier)
+                    kms::serve_with(&listen, certifier, auth.clone())
                 }
             }
             .map_err(|e| e.to_string())?;
@@ -383,7 +426,19 @@ fn run(args: &[String]) -> Result<(), String> {
                         .await
                         .map_err(|e| format!("bind {bind}: {e}"))?;
                     eprintln!("cairn node {id}: committee party on {bind}");
-                    let node = cairn_net::PartyNode::new(id, Arc::new(key), share, fault);
+                    let policy = cairn_net::policy::Policy::open(
+                        &key.pk,
+                        cairn_net::policy::PolicyConfig {
+                            chains: arg(args, "--chains").map(|c| c.split(',').map(|x| x.trim().to_owned()).collect()),
+                            state_file: arg(args, "--state").map(PathBuf::from),
+                            audit_log: arg(args, "--audit-log").map(PathBuf::from),
+                        },
+                    )
+                    .map_err(|e| format!("signing policy state: {e}"))?;
+                    if arg(args, "--state").is_none() {
+                        eprintln!("cairn node {id}: no --state file; the last signed height is forgotten on restart");
+                    }
+                    let node = cairn_net::PartyNode::new(id, Arc::new(key), share, fault, policy);
                     cairn_net::flat::run_party(listener, node, delay, identity).await;
                     Ok(())
                 });
@@ -517,6 +572,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     round_timeout: Duration::from_millis(ms(args, "--round-timeout-ms", 10_000)?),
                     ..NetPolicy::default()
                 };
+                let pk_bytes = key.pk;
                 let (t, total) = (key.params.t, key.params.n);
                 let mut signer = cairn_sidecar::cluster::CommitteeSigner::new(
                     key,
@@ -527,8 +583,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
                 let (mut ms_all, mut execs, mut bytes) = (Vec::new(), 0.0, 0.0);
                 for i in 0..n {
-                    let message =
-                        format!("pqc-sidecar/checkpoint/v2 remote bench {i}").into_bytes();
+                    let message = bench_checkpoint(&pk_bytes, i);
                     let (_, report) = signer.sign_with_report(&message)?;
                     ms_all.push(report.elapsed.as_secs_f64() * 1e3);
                     execs += report.rejections as f64 + 1.0;
@@ -699,7 +754,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
                     let (mut ms_all, mut execs, mut bytes) = (Vec::new(), 0.0, 0.0);
                     for i in 0..n_sig {
-                        let message = format!("pqc-sidecar/checkpoint/v2 bench {i}").into_bytes();
+                        let message = bench_checkpoint(&committee.key.pk, i);
                         let (_, report) = signer.sign_with_report(&message)?;
                         ms_all.push(report.elapsed.as_secs_f64() * 1e3);
                         execs += report.rejections as f64 + 1.0;

@@ -177,6 +177,10 @@ pub enum Body {
         c_tilde: Vec<u8>,
     },
     Verdict(Outcome),
+    /// The party's own signing policy refuses this message. Not a fault of the party.
+    PolicyRefused {
+        reason: String,
+    },
     /// The node will not do this (policy, unknown session, malformed request).
     Refused {
         reason: String,
@@ -215,6 +219,7 @@ impl Body {
             Body::Challenge { .. } => "Challenge",
             Body::Verdict(_) => "Verdict",
             Body::Refused { .. } => "Refused",
+            Body::PolicyRefused { .. } => "PolicyRefused",
             Body::BackendFault { .. } => "BackendFault",
         }
     }

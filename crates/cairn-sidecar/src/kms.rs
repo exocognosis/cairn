@@ -153,12 +153,29 @@ fn handle(
 }
 
 /// Serve the KMS-compatible API on `listen` (use port 0 for an ephemeral port).
-pub fn serve(listen: &str, mut certifier: impl KmsSigner) -> std::io::Result<KmsEndpoint> {
+pub fn serve(listen: &str, certifier: impl KmsSigner) -> std::io::Result<KmsEndpoint> {
+    serve_with(listen, certifier, None)
+}
+
+/// Serve the KMS-compatible API. With `auth`, every request must carry a valid AWS SigV4
+/// signature for those credentials. Without it, the endpoint refuses to bind anywhere but
+/// loopback: an unauthenticated signing endpoint must not be reachable from another machine.
+pub fn serve_with(
+    listen: &str,
+    mut certifier: impl KmsSigner,
+    auth: Option<crate::sigv4::KmsAuth>,
+) -> std::io::Result<KmsEndpoint> {
     let server = Arc::new(Server::http(listen).map_err(std::io::Error::other)?);
     let addr = server
         .server_addr()
         .to_ip()
         .ok_or_else(|| std::io::Error::other("not an IP listener"))?;
+    if auth.is_none() && !addr.ip().is_loopback() {
+        return Err(std::io::Error::other(
+            "refusing to serve unauthenticated KMS requests on a non-loopback address; \
+             configure credentials (--access-key-id) or bind to 127.0.0.1",
+        ));
+    }
     let worker = {
         let server = server.clone();
         std::thread::spawn(move || {
@@ -178,6 +195,37 @@ pub fn serve(listen: &str, mut certifier: impl KmsSigner) -> std::io::Result<Kms
                     .is_err()
                 {
                     continue;
+                }
+                if let Some(auth) = &auth {
+                    let headers: Vec<(String, String)> = request
+                        .headers()
+                        .iter()
+                        .map(|h| {
+                            (
+                                h.field.as_str().as_str().to_owned(),
+                                h.value.as_str().to_owned(),
+                            )
+                        })
+                        .collect();
+                    let url = request.url().to_owned();
+                    let (path, query) = url.split_once('?').unwrap_or((&url, ""));
+                    let method = request.method().as_str().to_owned();
+                    if let Err(reason) = crate::sigv4::verify(
+                        auth,
+                        &method,
+                        path,
+                        query,
+                        &headers,
+                        &body,
+                        std::time::SystemTime::now(),
+                    ) {
+                        eprintln!("cairn kms: rejected request ({reason})");
+                        let denied = json!({ "__type": "UnrecognizedClientException", "message": "request signature is not valid" });
+                        let _ = request.respond(
+                            Response::from_string(denied.to_string()).with_status_code(403),
+                        );
+                        continue;
+                    }
                 }
                 let (status, value) = handle(&mut certifier, &mut cache, &target, &body);
                 let header = Header::from_bytes("Content-Type", "application/x-amz-json-1.1")
