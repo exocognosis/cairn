@@ -107,22 +107,60 @@ fn polys(flat: &[i32], count: usize) -> Option<PolyVec> {
     })
 }
 
-/// `w` of one repetition (`K` polynomials) to and from its flat wire form.
-pub fn w_to_wire(w: &PolyVec) -> Vec<i32> {
-    flat(w)
+/// Pack field elements at 23 bits each (they are below 2^23).
+fn pack23(v: &PolyVec) -> Vec<u8> {
+    let mut out = Vec::with_capacity(v.len() * N * 23 / 8 + 1);
+    let (mut acc, mut bits) = (0u64, 0u32);
+    for c in v.iter().flatten() {
+        acc |= (*c as u64) << bits;
+        bits += 23;
+        while bits >= 8 {
+            out.push(acc as u8);
+            acc >>= 8;
+            bits -= 8;
+        }
+    }
+    if bits > 0 {
+        out.push(acc as u8);
+    }
+    out
 }
 
-pub fn w_from_wire(v: &[i32]) -> Option<PolyVec> {
-    polys(v, K)
+fn unpack23(bytes: &[u8], count: usize) -> Option<PolyVec> {
+    if bytes.len() != (count * N * 23).div_ceil(8) {
+        return None;
+    }
+    let (mut acc, mut bits, mut pos) = (0u64, 0u32, 0usize);
+    let mut flat = Vec::with_capacity(count * N);
+    for _ in 0..count * N {
+        while bits < 23 {
+            acc |= (bytes[pos] as u64) << bits;
+            pos += 1;
+            bits += 8;
+        }
+        flat.push((acc & 0x7f_ffff) as i32);
+        acc >>= 23;
+        bits -= 23;
+    }
+    polys(&flat, count)
 }
 
-/// `z1` of one repetition (`L` polynomials) to and from its flat wire form.
-pub fn z_to_wire(z: &PolyVec) -> Vec<i32> {
-    flat(z)
+/// `w` of one repetition (`K` polynomials) to and from its packed wire form.
+pub fn w_to_wire(w: &PolyVec) -> Vec<u8> {
+    pack23(w)
 }
 
-pub fn z_from_wire(v: &[i32]) -> Option<PolyVec> {
-    polys(v, L)
+pub fn w_from_wire(v: &[u8]) -> Option<PolyVec> {
+    unpack23(v, K)
+}
+
+/// `z1` of one repetition (`L` polynomials) to and from its packed wire form.
+pub fn z_to_wire(z: &PolyVec) -> Vec<u8> {
+    pack23(z)
+}
+
+pub fn z_from_wire(v: &[u8]) -> Option<PolyVec> {
+    unpack23(v, L)
 }
 
 impl GroupKey {
@@ -594,6 +632,21 @@ mod tests {
                 assert!(stats.executions <= 16, "{stats:?}");
             }
         }
+    }
+
+    #[test]
+    fn wire_packing_round_trips() {
+        let (key, parties) = keygen(2, 3, &mut OsRng).unwrap();
+        let (state, _) = parties[0].round1(&key, &mut OsRng);
+        let w = &state.reveal()[0];
+        let packed = w_to_wire(w);
+        assert_eq!(packed.len(), K * N * 23 / 8);
+        assert_eq!(&w_from_wire(&packed).unwrap(), w);
+        assert!(w_from_wire(&packed[1..]).is_none());
+        let z: PolyVec = (0..L)
+            .map(|i| std::array::from_fn(|j| ((i * 7919 + j * 104729) % 8_380_417) as i32))
+            .collect();
+        assert_eq!(z_from_wire(&z_to_wire(&z)).unwrap(), z);
     }
 
     #[test]

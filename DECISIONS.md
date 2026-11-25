@@ -372,5 +372,15 @@ whose response was wrong. The coordinator distinguishes an honest failure (publi
 a wrong response (the signing equation is off by a large amount) and rotates the active set in
 the second case.
 
-**D-73. `w` and `z1` travel unpacked.** Four bytes per coefficient on the wire, where 23 and 20
-bits would do. Simpler now; about a third of the traffic can be recovered later.
+**D-73. `w` and `z1` travel packed at 23 bits (changed after the two-host run).** They were
+first sent at four bytes per coefficient. The run across hosts showed data volume, not round
+trips, dominating, so values are now packed and a party is no longer sent its own openings.
+
+**D-74. A party takes its own openings from its own state.** The coordinator no longer relays
+them, and a copy it sends anyway is ignored. This saves a third of round 3's traffic at T = 3
+and removes a way for the coordinator to feed a party a different value for its own mask.
+
+**D-75. Second two-host run, 2026-11-25.** Same method as D-62 and D-64: a temporary Hetzner
+`cpx42` in Helsinki for about 40 minutes (one billed hour), deleted afterwards with its SSH
+key. Results are in docs/PRODUCTION_PATH.md. The main finding is that the injected-delay
+benchmark understates WAN cost for this protocol because it does not model data transfer.

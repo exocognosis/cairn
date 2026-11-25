@@ -170,15 +170,53 @@ injected round-trip time on every link (`cairn committee-bench`):
 
 | RTT | committee | latency ms (mean / p50 / p95 / max) | executions (mean) | kB per party per cert |
 |---|---|---|---|---|
-| localhost | 2-of-3 | 38 / 34 / 84 / 150 | 2.26 | 234 |
-| localhost | 3-of-4 | 88 / 50 / 198 / 246 | 1.77 | 945 |
-| localhost | 3-of-5 | 316 / 271 / 821 / 1,360 | 2.31 | 3,745 |
-| 50 ms | 2-of-3 | 391 / 370 / 958 / 1,537 | 2.04 | 211 |
-| 50 ms | 3-of-4 | 482 / 470 / 1,196 / 1,688 | 2.02 | 1,077 |
-| 50 ms | 3-of-5 | 685 / 636 / 1,279 / 2,239 | 2.15 | 3,487 |
+| localhost | 2-of-3 | 35 / 34 / 68 / 151 | 2.06 | 108 |
+| localhost | 3-of-4 | 92 / 97 / 245 / 346 | 1.86 | 549 |
+| localhost | 3-of-5 | 276 / 275 / 553 / 1,102 | 1.99 | 1,776 |
+| 50 ms | 2-of-3 | 376 / 208 / 935 / 1,248 | 2.01 | 106 |
+| 50 ms | 3-of-4 | 479 / 238 / 1,161 / 1,885 | 2.04 | 602 |
+| 50 ms | 3-of-5 | 613 / 320 / 1,568 / 2,822 | 1.95 | 1,740 |
 
-So the 2 to 3 s target is met with room to spare at 50 ms for these committees, on one
-machine. Not yet done: a run across real hosts; packing `w` and `z1` (traffic is about three
-times what it needs to be, and round 3 sends every party all the openings); distributed key
+(Table refreshed after values were packed; see the next section for the run across real
+hosts, which is slower than these rows suggest.) Not yet done: distributed key
 generation; request authentication on the KMS endpoint; any review of the implementation
 against the paper's security argument.
+
+## Update: across two hosts
+
+One run on 2026-11-25: `party_1` and the coordinator on an Apple M3 on a home connection in the
+US, the other parties on a Hetzner `cpx42` in Helsinki, 185 ms round trip, mutual TLS inside
+SSH port forwards (`scripts/split-host/committee.sh`). The active set was `party_1` plus two
+remote parties.
+
+| committee | certs | latency s (mean / p50 / p95 / max) | executions (mean) | kB per party per cert |
+|---|---|---|---|---|
+| 2-of-3, values unpacked | 50 | 1.63 / 1.29 / 3.89 / 5.70 | 2.48 | 256 |
+| 3-of-4, values unpacked | 50 | 4.60 / 3.48 / 12.64 / 16.28 | 1.72 | 917 |
+| 2-of-3 | 50 | 1.02 / 0.76 / 2.33 / 3.08 | 1.64 | 86 |
+| 3-of-4 | 50 | 3.90 / 3.22 / 9.41 / 12.61 | 1.84 | 544 |
+| 3-of-5 | 20 | 6.30 / 6.24 / 11.66 / 16.53 | 2.10 | 1,872 |
+
+A stock pqc-sidecar on the Mac also signed a live checkpoint through the cross-host 3-of-4
+committee in about 3 s; the unmodified verifier accepted it and rejected a tampered copy.
+
+What this run showed:
+
+- **The injected-delay benchmark was too optimistic.** It predicted about 0.5 s for 3-of-4;
+  the real link gave 3.9 s. Injected delay charges round trips but not the time to move data,
+  and this protocol moves a lot: about 0.3 MB per party per execution for 3-of-4.
+- **On this link, moving the data is the cost.** A raw transfer between the two hosts took
+  about 0.8 s for 100 kB and 1.6 s for 400 kB upstream (after connection setup), which is TCP
+  slow start over a 185 ms path from a home uplink. Three round trips are only 0.55 s.
+- **Packing helped but not enough.** Sending values at 23 bits instead of 32 and no longer
+  sending a party its own openings cut traffic by 40 to 65% and time by 15 to 37%.
+- **2-of-3 meets the 2 to 3 s target here; 3-of-4 does not, on this link.** A coordinator in a
+  datacenter near the parties should do much better; that has not been measured.
+
+The next reductions, in order of expected effect: sample the masks ahead of time so round 1
+and its upload happen before a request arrives (the paper notes round 1 can run offline); send
+each party only what it needs to recompute the challenge and check commitments more compactly;
+keep connections warm between rounds. None is done.
+
+Limits of this run: one run, 20 to 50 certificates per row, one home uplink, an SSH tunnel
+under the TLS links, shared vCPUs, a chain stand-in.

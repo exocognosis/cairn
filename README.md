@@ -72,16 +72,26 @@ Apple M3, each party its own process, injected round-trip time on every link:
 
 | RTT | committee | latency ms (mean / p50 / p95 / max) | executions (mean) | kB per party per cert |
 |---|---|---|---|---|
-| localhost | 2-of-3 | 38 / 34 / 84 / 150 | 2.26 | 234 |
-| localhost | 3-of-4 | 88 / 50 / 198 / 246 | 1.77 | 945 |
-| localhost | 3-of-5 | 316 / 271 / 821 / 1,360 | 2.31 | 3,745 |
-| 50 ms | 2-of-3 | 391 / 370 / 958 / 1,537 | 2.04 | 211 |
-| 50 ms | 3-of-4 | 482 / 470 / 1,196 / 1,688 | 2.02 | 1,077 |
-| 50 ms | 3-of-5 | 685 / 636 / 1,279 / 2,239 | 2.15 | 3,487 |
+| localhost | 2-of-3 | 35 / 34 / 68 / 151 | 2.06 | 108 |
+| localhost | 3-of-4 | 92 / 97 / 245 / 346 | 1.86 | 549 |
+| localhost | 3-of-5 | 276 / 275 / 553 / 1,102 | 1.99 | 1,776 |
+| 50 ms | 2-of-3 | 376 / 208 / 935 / 1,248 | 2.01 | 106 |
+| 50 ms | 3-of-4 | 479 / 238 / 1,161 / 1,885 | 2.04 | 602 |
+| 50 ms | 3-of-5 | 613 / 320 / 1,568 / 2,822 | 1.95 | 1,740 |
 
-For comparison, the tower design at 50 ms takes about 1 s with a clear-text stand-in for its
-MPC and took 21 s across two hosts with the real one. These committee numbers include all of
-the cryptography; there is nothing left to substitute.
+**Across two real hosts** (one party and the coordinator on a home connection in the US, the
+others in Helsinki, 185 ms apart) it is slower than the injected-delay rows suggest, because
+this protocol moves a lot of data and injected delay does not model that:
+
+| committee | certs | latency s (mean / p50 / p95) | kB per party per cert |
+|---|---|---|---|
+| 2-of-3 | 50 | 1.02 / 0.76 / 2.33 | 86 |
+| 3-of-4 | 50 | 3.90 / 3.22 / 9.41 | 544 |
+| 3-of-5 | 20 | 6.30 / 6.24 / 11.66 | 1,872 |
+
+A stock pqc-sidecar signed a live checkpoint through the cross-host 3-of-4 committee in about
+3 s. For comparison, the tower design took 21 s on a similar link with real MPC. These numbers
+include all of the cryptography; there is nothing left to substitute.
 
 ```bash
 ./scripts/run_local_committee.sh --committee 3-of-4
@@ -92,9 +102,8 @@ cargo run --release -p cairn-sidecar -- mithril-demo --threshold 3 --parties 4
 ```
 
 **It is a prototype, not a secure implementation**: written from the paper without comparison
-against the authors' code, floating-point sampling, a trusted dealer, not constant time, not
-run across real hosts yet, and traffic is about three times larger than it needs to be because
-values travel unpacked. Cost also rises steeply with the threshold, so small thresholds are the
+against the authors' code, floating-point sampling, a trusted dealer, not constant time, and
+measured across hosts only once, on one link. Cost also rises steeply with the threshold, so small thresholds are the
 practical range. [docs/PRODUCTION_PATH.md](docs/PRODUCTION_PATH.md) has the comparison and what
 is missing; ARCHITECTURE.md section 10.7 has the protocol. Everything below describes the
 original tower design, which remains the "exact FIPS 204 signer" mode.

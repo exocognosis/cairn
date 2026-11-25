@@ -507,6 +507,46 @@ fn run(args: &[String]) -> Result<(), String> {
                 .map_or(Ok(20), |v| v.parse())
                 .map_err(|_| "bad --signatures")?;
             let peers = peers(args)?.ok_or("remote-bench needs --peers")?;
+            if let Some(file) = arg(args, "--committee") {
+                // A flat committee that is already running (three-round protocol).
+                let key = Arc::new(
+                    cairn_net::flat::read_committee(&PathBuf::from(file))
+                        .map_err(|e| e.to_string())?,
+                );
+                let policy = NetPolicy {
+                    round_timeout: Duration::from_millis(ms(args, "--round-timeout-ms", 10_000)?),
+                    ..NetPolicy::default()
+                };
+                let (t, total) = (key.params.t, key.params.n);
+                let mut signer = cairn_sidecar::cluster::CommitteeSigner::new(
+                    key,
+                    peers,
+                    policy,
+                    tls(args, NodeId::Coordinator)?,
+                )
+                .map_err(|e| e.to_string())?;
+                let (mut ms_all, mut execs, mut bytes) = (Vec::new(), 0.0, 0.0);
+                for i in 0..n {
+                    let message =
+                        format!("pqc-sidecar/checkpoint/v2 remote bench {i}").into_bytes();
+                    let (_, report) = signer.sign_with_report(&message)?;
+                    ms_all.push(report.elapsed.as_secs_f64() * 1e3);
+                    execs += report.rejections as f64 + 1.0;
+                    bytes += report.coordinator_bytes.values().sum::<u64>() as f64 / t as f64;
+                }
+                ms_all.sort_by(|a, b| a.total_cmp(b));
+                let at = |q: f64| ms_all[((ms_all.len() - 1) as f64 * q).round() as usize];
+                println!(
+                    "| {t}-of-{total} | {n} | {:.0} / {:.0} / {:.0} / {:.0} | {:.2} | {:.0} |",
+                    ms_all.iter().sum::<f64>() / ms_all.len() as f64,
+                    at(0.5),
+                    at(0.95),
+                    at(1.0),
+                    execs / n as f64,
+                    bytes / n as f64 / 1e3
+                );
+                return Ok(());
+            }
             let file = arg(args, "--group").ok_or("remote-bench needs --group <group.bin>")?;
             let group = Arc::new(net::read_group(&PathBuf::from(file)).map_err(|e| e.to_string())?);
             let policy = NetPolicy {

@@ -118,8 +118,13 @@ impl PartyNode {
                 else {
                     return refused("rounds out of order");
                 };
+                // Our own openings come from our own state, never from the coordinator.
                 let mut map: BTreeMap<u8, Vec<PolyVec>> = BTreeMap::new();
+                map.insert(self.share.index, round1.reveal());
                 for (index, ws) in revealed {
+                    if index == self.share.index {
+                        continue;
+                    }
                     let Some(ws) = ws
                         .iter()
                         .map(|w| mithril::w_from_wire(w))
@@ -263,7 +268,7 @@ impl FlatCoordinator {
         }
     }
 
-    /// One round to every active party. Collects replies through `take`, or the faults.
+    /// One round with the same body for every active party.
     async fn round<T>(
         &self,
         report: &Mutex<&mut NetReport>,
@@ -272,10 +277,23 @@ impl FlatCoordinator {
         body: &Body,
         take: impl Fn(Body) -> Option<T>,
     ) -> Result<BTreeMap<u8, T>, Vec<NetFault>> {
+        self.round_with(report, active, session, |_| body.clone(), take)
+            .await
+    }
+
+    /// One round to every active party. Collects replies through `take`, or the faults.
+    async fn round_with<T>(
+        &self,
+        report: &Mutex<&mut NetReport>,
+        active: &[u8],
+        session: [u8; 32],
+        body: impl Fn(u8) -> Body,
+        take: impl Fn(Body) -> Option<T>,
+    ) -> Result<BTreeMap<u8, T>, Vec<NetFault>> {
         let replies = join_all(
             active
                 .iter()
-                .map(|i| self.ask(report, NodeId::Party(i + 1), session, body.clone())),
+                .map(|i| self.ask(report, NodeId::Party(i + 1), session, body(*i))),
         )
         .await;
         let (mut out, mut faults) = (BTreeMap::new(), Vec::new());
@@ -331,17 +349,27 @@ impl FlatCoordinator {
                 }
             })
             .await?;
-        let m3 = Body::M3 {
-            revealed: wire_w.iter().map(|(i, w)| (*i, w.clone())).collect(),
-        };
+        // Each party gets the others' openings; it already holds its own.
         let wire_z = self
-            .round(report, active, session, &m3, |b| {
-                if let Body::M3Response { z } = b {
-                    Some(z)
-                } else {
-                    None
-                }
-            })
+            .round_with(
+                report,
+                active,
+                session,
+                |to| Body::M3 {
+                    revealed: wire_w
+                        .iter()
+                        .filter(|(i, _)| **i != to)
+                        .map(|(i, w)| (*i, w.clone()))
+                        .collect(),
+                },
+                |b| {
+                    if let Body::M3Response { z } = b {
+                        Some(z)
+                    } else {
+                        None
+                    }
+                },
+            )
             .await?;
 
         let malformed = |i: &u8| {

@@ -137,9 +137,10 @@ pub enum Body {
     M2 {
         commitments: Vec<(u8, [u8; 32])>,
     },
-    /// Round 3: here are everyone's `w` values; answer where your rejection test passes.
+    /// Round 3: here are the other parties' `w` values (packed, 23 bits per coefficient; the
+    /// recipient already has its own); answer where your rejection test passes.
     M3 {
-        revealed: Vec<(u8, Vec<Vec<i32>>)>,
+        revealed: Vec<(u8, Vec<Vec<u8>>)>,
     },
 
     // Replies.
@@ -150,11 +151,11 @@ pub enum Body {
         commitment: [u8; 32],
     },
     M2Reveal {
-        w: Vec<Vec<i32>>,
+        w: Vec<Vec<u8>>,
     },
     /// One entry per parallel repetition: `z1`, or `None` where the party's test rejected.
     M3Response {
-        z: Vec<Option<Vec<i32>>>,
+        z: Vec<Option<Vec<u8>>>,
     },
     Dealt {
         p2p_bytes: u64,
