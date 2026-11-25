@@ -641,6 +641,20 @@ pub fn write_flat_keys(dir: &Path, key: &GroupKey, parties: &[PartyKey]) -> std:
     ClusterTls::generate(&ids)?.write(&dir.join("tls"))
 }
 
+/// Write one party's results of a key generation: `committee.bin` and its own share file.
+pub fn write_party_files(dir: &Path, key: &GroupKey, share: &PartyKey) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join("committee.bin"), key.to_bytes())?;
+    let path = party_share_file(dir, NodeId::Party(share.index + 1));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    std::io::Write::write_all(&mut f, &share.to_bytes())
+}
+
 pub fn read_committee(path: &Path) -> std::io::Result<GroupKey> {
     GroupKey::from_bytes(&std::fs::read(path)?)
         .ok_or_else(|| std::io::Error::other("malformed committee file"))

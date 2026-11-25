@@ -11,9 +11,9 @@
 //! imbalanced hyperball rejection, public combine.
 //!
 //! **Prototype status.** Written from the paper, not checked against the authors' code. The
-//! hyperball sampler uses `f64` and Box-Muller, the share partition is a simple balanced
-//! assignment rather than the paper's max-flow optimum, there is no distributed key generation
-//! (the paper's Appendix D), and nothing is constant time. It shows that the approach produces
+//! hyperball sampler uses `f64` and Box-Muller and nothing is constant time. The share partition
+//! uses the paper's tables, and distributed key generation (its Appendix D) lives in
+//! `cairn-net::dkg`. It shows that the approach produces
 //! standard signatures at the published parameters and what it costs; it is not a secure
 //! implementation.
 
@@ -215,6 +215,75 @@ impl PartyKey {
     }
 }
 
+impl GroupKey {
+    /// Build the public key material from a seed `rho` and the full `t = A s1 + s2`.
+    pub fn from_parts(t: usize, n: usize, rho: [u8; 32], t_full: &PolyVec) -> Option<Self> {
+        let (pk, t1, tr) = fips204::public_key_from_t(&rho, t_full);
+        Some(Self {
+            pk,
+            rho,
+            tr,
+            t1,
+            params: params_65(t, n)?,
+            a_hat: expand_a(&rho),
+        })
+    }
+}
+
+impl PartyKey {
+    /// A party's key from the subset secrets it holds (distributed key generation).
+    pub fn from_shares(index: u8, shares: BTreeMap<Subset, (PolyVec, PolyVec)>) -> Self {
+        Self { index, shares }
+    }
+
+    /// The subsets whose secrets this party holds.
+    pub fn subsets(&self) -> Vec<Subset> {
+        self.shares.keys().cloned().collect()
+    }
+}
+
+/// Every subset of `N - T + 1` parties, in a fixed order.
+pub fn all_subsets(t: usize, n: usize) -> Vec<Subset> {
+    let mut all = subsets(n, n - t + 1);
+    all.sort();
+    all
+}
+
+/// Derive one subset's short secret from its shared seed and the public randomness (the
+/// paper's `H_keygen`): the standard ML-DSA secret distribution, expanded from a hash.
+pub fn derive_subset_secret(
+    subset: &[u8],
+    seed: &[u8; 32],
+    randomness: &[u8],
+) -> (PolyVec, PolyVec) {
+    let mut expanded = [0u8; 64];
+    shake256(
+        &[
+            b"cairn/dkg/keygen/v1",
+            &[subset.len() as u8],
+            subset,
+            seed,
+            randomness,
+        ],
+        &mut expanded,
+    );
+    fips204::expand_s(&expanded)
+}
+
+/// `t_S = A s1_S + s2_S` for a subset secret under the matrix seeded by `rho`.
+pub fn subset_public(rho: &[u8; 32], secret: &(PolyVec, PolyVec)) -> PolyVec {
+    vec_add(&mat_vec_coeff(&expand_a(rho), &secret.0), &secret.1)
+}
+
+/// `K` polynomials packed at 23 bits per coefficient, and back.
+pub fn pack_k(v: &PolyVec) -> Vec<u8> {
+    pack23(v)
+}
+
+pub fn unpack_k(bytes: &[u8]) -> Option<PolyVec> {
+    unpack23(bytes, K)
+}
+
 impl Round1 {
     pub fn index(&self) -> u8 {
         self.index
@@ -269,24 +338,83 @@ pub fn keygen<R: Rng + CryptoRng>(
     ))
 }
 
-/// Deterministic, balanced assignment of every subset's secret to one active party that holds
-/// it (the paper's `RSSRecover`; it uses a max-flow optimum, this is a greedy balance).
+/// The paper's optimal assignment (its Algorithm 6) for the canonical active set `{0..T-1}`:
+/// for each active party, the subsets (as digit strings) whose secrets it uses.
+fn ideal_sharing(t: usize, n: usize) -> Option<&'static [&'static [&'static str]]> {
+    Some(match (t, n) {
+        (2, 3) => &[&["01", "02"], &["12"]],
+        (2, 4) => &[&["013", "023"], &["012", "123"]],
+        (3, 4) => &[&["01", "03"], &["12", "13"], &["23", "02"]],
+        (2, 5) => &[&["0134", "0234", "0124"], &["1234", "0123"]],
+        (3, 5) => &[
+            &["034", "013", "014", "023"],
+            &["012", "123", "124", "134"],
+            &["234", "024"],
+        ],
+        (4, 5) => &[
+            &["01", "03", "04"],
+            &["12", "13", "14"],
+            &["23", "02", "24"],
+            &["34"],
+        ],
+        (2, 6) => &[&["02345", "01235", "01245"], &["12345", "01234", "01345"]],
+        (3, 6) => &[
+            &["0134", "0124", "0135", "0345", "0125"],
+            &["0145", "1345", "1235", "1234", "1245"],
+            &["0235", "0245", "0234", "0123", "2345"],
+        ],
+        (4, 6) => &[
+            &["014", "023", "015", "012", "045"],
+            &["135", "134", "125", "145", "124"],
+            &["245", "024", "235", "234", "025"],
+            &["034", "013", "123", "345", "035"],
+        ],
+        (5, 6) => &[
+            &["01", "02", "05"],
+            &["12", "13", "15"],
+            &["23", "24", "25"],
+            &["03", "34", "35"],
+            &["45", "04", "14"],
+        ],
+        _ => return None,
+    })
+}
+
+/// Deterministic assignment of every subset's secret to one active party that holds it (the
+/// paper's `RSSRecover`). Uses the paper's balanced tables, relabelled for the active set.
 pub fn recover_partition(params: &Params, active: &[u8]) -> Option<BTreeMap<u8, Vec<Subset>>> {
-    if active.len() != params.t {
+    let (t, n) = (params.t, params.n);
+    let mut act = active.to_vec();
+    act.sort();
+    act.dedup();
+    if act.len() != t || act.iter().any(|i| *i as usize >= n) {
         return None;
     }
-    let mut out: BTreeMap<u8, Vec<Subset>> = active.iter().map(|i| (*i, Vec::new())).collect();
-    let mut all = subsets(params.n, params.n - params.t + 1);
-    // Subsets with the fewest eligible holders first, each to the least-loaded holder.
-    all.sort_by_key(|s| (s.iter().filter(|i| active.contains(i)).count(), s.clone()));
-    for subset in all {
-        let holder = *subset
-            .iter()
-            .filter(|i| active.contains(i))
-            .min_by_key(|i| (out[*i].len(), **i))?;
-        out.get_mut(&holder)?.push(subset);
+    if t == n {
+        return Some(act.iter().map(|i| (*i, vec![vec![*i]])).collect());
     }
-    Some(out)
+    // phi maps canonical indices to real ones: active parties first, the rest after.
+    let mut phi: Vec<u8> = act.clone();
+    phi.extend((0..n as u8).filter(|i| !act.contains(i)));
+    let table = ideal_sharing(t, n)?;
+    Some(
+        table
+            .iter()
+            .enumerate()
+            .map(|(i, sets)| {
+                let mapped = sets
+                    .iter()
+                    .map(|digits| {
+                        let mut subset: Subset =
+                            digits.bytes().map(|d| phi[(d - b'0') as usize]).collect();
+                        subset.sort();
+                        subset
+                    })
+                    .collect();
+                (phi[i], mapped)
+            })
+            .collect(),
+    )
 }
 
 /// Uniform point in the ball of radius `radius` in `DIM` dimensions (`DIM + 2` Gaussians,
@@ -582,7 +710,23 @@ mod tests {
 
     #[test]
     fn partitions_cover_every_secret_exactly_once() {
-        for (t, n) in [(2, 3), (3, 4), (3, 5), (4, 6)] {
+        for (t, n) in [
+            (2, 2),
+            (2, 3),
+            (3, 3),
+            (2, 4),
+            (3, 4),
+            (4, 4),
+            (2, 5),
+            (3, 5),
+            (4, 5),
+            (5, 5),
+            (2, 6),
+            (3, 6),
+            (4, 6),
+            (5, 6),
+            (6, 6),
+        ] {
             let params = params_65(t, n).unwrap();
             for active in subsets(n, t) {
                 let part = recover_partition(&params, &active).unwrap();

@@ -38,7 +38,15 @@ Multi-process cluster:
              [--share <file>]            (signer)
              [--mpc-socket-dir <dir>]    (root: MPC backend party sockets)
              [--round-timeout-ms <n>] [--mpc-timeout-ms <n>] [--link-delay-ms <n>] [--fault <mode>]
-  cairn keygen --out <dir> --committee <T-of-N>      (flat committee, three-round protocol)
+  cairn keygen --out <dir> --committee <T-of-N>      (flat committee, TRUSTED DEALER; tests only)
+  cairn identity --out <file>                         (a party's long-term identity key)
+  cairn dkg-party --id party_<k> --bind <addr:port> --roster <roster.json> --identity <file>
+                  --tls <dir> --out <dir>
+  cairn dkg --roster <roster.json> --peers <peers.json> --tls <dir> [--public-key-out <file>]
+      Distributed key generation: no machine ever holds the whole key. Each party runs
+      dkg-party; then one run of dkg drives it. roster.json lists every party's public
+      identity key. `cairn committee-init --committee T-of-N --out <dir>` makes identities,
+      a roster and TLS certificates on one machine for local use.
   cairn node --role party --id party_<k> --bind <addr:port> --peers <peers.json>
              --committee <committee.bin> --tls <dir> --share <file>
              [--state <file>] [--audit-log <file>] [--chains <caip2,caip2>]
@@ -774,6 +782,141 @@ fn run(args: &[String]) -> Result<(), String> {
                 }
             }
             let _ = std::fs::remove_dir_all(&work);
+            Ok(())
+        }
+        Some("identity") => {
+            use std::os::unix::fs::OpenOptionsExt;
+            let out = PathBuf::from(arg(args, "--out").ok_or("identity needs --out <file>")?);
+            let identity = cairn_net::dkg::Identity::generate()?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&out)
+                .map_err(|e| format!("{}: {e}", out.display()))?;
+            std::io::Write::write_all(&mut f, identity.to_pkcs8()).map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                json!({ "identity_file": out, "public": hex::encode(identity.public()) })
+            );
+            Ok(())
+        }
+        Some("committee-init") => {
+            // Local and test convenience: one machine makes every identity and the TLS
+            // certificates. It never makes the signing key; `cairn dkg` does that jointly.
+            let out = PathBuf::from(arg(args, "--out").ok_or("committee-init needs --out <dir>")?);
+            let spec = arg(args, "--committee").ok_or("committee-init needs --committee T-of-N")?;
+            let (t, n) = spec
+                .split_once("-of-")
+                .and_then(|(t, n)| Some((t.parse::<u8>().ok()?, n.parse::<usize>().ok()?)))
+                .ok_or("--committee expects T-of-N, for example 3-of-4")?;
+            let host = arg(args, "--host").unwrap_or_else(|| "127.0.0.1".into());
+            let base: u16 = arg(args, "--base-port")
+                .map_or(Ok(7300), |v| v.parse())
+                .map_err(|_| "bad --base-port")?;
+            let mut identities = Vec::new();
+            for k in 1..=n {
+                use std::os::unix::fs::OpenOptionsExt;
+                let dir = out.join(format!("party_{k}"));
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                let identity = cairn_net::dkg::Identity::generate()?;
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(dir.join("identity.pk8"))
+                    .map_err(|e| e.to_string())?;
+                std::io::Write::write_all(&mut f, identity.to_pkcs8())
+                    .map_err(|e| e.to_string())?;
+                identities.push(identity.public());
+            }
+            let roster = cairn_net::dkg::Roster {
+                threshold: t,
+                identities,
+            };
+            std::fs::write(
+                out.join("roster.json"),
+                cairn_net::dkg::roster_to_json(&roster),
+            )
+            .map_err(|e| e.to_string())?;
+            let peers = cairn_net::flat::flat_peers(n, &host, base);
+            std::fs::write(out.join("peers.json"), net::peers_to_json(&peers))
+                .map_err(|e| e.to_string())?;
+            let mut ids: Vec<NodeId> = peers.keys().copied().collect();
+            ids.push(NodeId::Coordinator);
+            cairn_net::ClusterTls::generate(&ids)
+                .and_then(|tls| tls.write(&out.join("tls")))
+                .map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                json!({ "out": out, "committee": spec, "next": "start `cairn dkg-party` for each party, then `cairn dkg`" })
+            );
+            Ok(())
+        }
+        Some("dkg-party") => {
+            let id: NodeId = arg(args, "--id")
+                .ok_or("dkg-party needs --id party_<k>")?
+                .parse()?;
+            let bind = arg(args, "--bind").ok_or("dkg-party needs --bind <addr:port>")?;
+            let out = PathBuf::from(arg(args, "--out").ok_or("dkg-party needs --out <dir>")?);
+            let roster = cairn_net::dkg::roster_from_json(
+                &std::fs::read_to_string(
+                    arg(args, "--roster").ok_or("dkg-party needs --roster <file>")?,
+                )
+                .map_err(|e| e.to_string())?,
+            )?;
+            let identity = cairn_net::dkg::Identity::from_pkcs8(
+                &std::fs::read(arg(args, "--identity").ok_or("dkg-party needs --identity <file>")?)
+                    .map_err(|e| e.to_string())?,
+            )?;
+            let identity_tls = tls(args, id)?;
+            let node = Arc::new(cairn_net::dkg::DkgNode::new(
+                id,
+                roster,
+                &identity,
+                out.clone(),
+            ));
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::bind(&bind).await.map_err(|e| format!("bind {bind}: {e}"))?;
+                eprintln!("cairn dkg-party {id}: waiting for key generation on {bind}");
+                tokio::select! {
+                    _ = cairn_net::transport::serve(listener, node.clone(), Duration::ZERO, identity_tls) => {}
+                    _ = node.finished() => {
+                        // Let the last reply leave before exiting.
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                }
+                eprintln!("cairn dkg-party {id}: wrote committee.bin and its share to {}", out.display());
+                Ok(())
+            })
+        }
+        Some("dkg") => {
+            let roster = cairn_net::dkg::roster_from_json(
+                &std::fs::read_to_string(arg(args, "--roster").ok_or("dkg needs --roster <file>")?)
+                    .map_err(|e| e.to_string())?,
+            )?;
+            let peers = peers(args)?.ok_or("dkg needs --peers")?;
+            let link = Link::new(
+                Duration::from_millis(ms(args, "--round-timeout-ms", 20_000)?),
+                Duration::ZERO,
+                tls(args, NodeId::Coordinator)?,
+            );
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            let pk = runtime.block_on(cairn_net::dkg::run(&roster, &peers, &link))?;
+            if let Some(path) = arg(args, "--public-key-out") {
+                write_public_key(&PathBuf::from(path), &pk).map_err(|e| e.to_string())?;
+            }
+            println!(
+                "{}",
+                json!({ "generated": true, "parties": roster.n(), "threshold": roster.threshold, "key_id": hex::encode(cairn_sidecar::key_id(&pk)) })
+            );
             Ok(())
         }
         _ => Err(USAGE.into()),

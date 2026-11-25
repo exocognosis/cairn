@@ -53,7 +53,8 @@ cairn is a **research preview, not custody software**. The three gaps that matte
    from ones that deviate.
 2. **Trust concentrates while signing.** At rest, 9 of 16 signers are needed to reach the key.
    During a signing session, two colluding root engines are enough.
-3. **One dealer creates the key.** Dealerless key generation is not implemented.
+3. **One dealer creates the key** in the tower design. (The newer committee protocol below
+   generates its key jointly.)
 
 Nothing here has had outside review. [Status and limits](#status-and-limits) has the full
 list and [ROADMAP.md](ROADMAP.md) says what closing each gap takes.
@@ -104,14 +105,17 @@ include all of the cryptography; there is nothing left to substitute.
 cargo run --release -p cairn-sidecar -- mithril-demo --threshold 3 --parties 4
 ```
 
+The committee generates its own key: `cairn dkg` runs the paper's distributed key generation,
+so no machine ever holds the whole key (the local script uses it by default).
+
 Safeguards an operator gets today: every party checks the checkpoint itself and will not sign
 for another key, an unlisted chain, a lower height, or a second checkpoint at one height (kept
 on disk across restarts); the KMS endpoint verifies AWS SigV4 request signatures and refuses to
 listen beyond loopback without credentials; parties and the coordinator write audit logs.
 
 **It is a prototype, not a secure implementation**: written from the paper without comparison
-against the authors' code, floating-point sampling, a trusted dealer, not constant time, and
-measured across hosts only once, on one link. Cost also rises steeply with the threshold, so small thresholds are the
+against the authors' code, floating-point sampling, not constant time, and measured across
+hosts only once, on one link. Cost also rises steeply with the threshold, so small thresholds are the
 practical range. [docs/PRODUCTION_PATH.md](docs/PRODUCTION_PATH.md) has the comparison and what
 is missing; ARCHITECTURE.md section 10.7 has the protocol. Everything below describes the
 original tower design, which remains the "exact FIPS 204 signer" mode.
@@ -320,7 +324,8 @@ interval = 100   # checkpoint cadence: every K finalized blocks
 | `cairn mpc-worker --socket-dir <dir>` | Run the stand-in MPC backend (clear text, for testing). |
 | `cairn serve-kms ...` | Coordinate signing and expose it as a KMS-compatible endpoint for pqc-sidecar. |
 | `cairn mock-chain` | A minimal CometBFT RPC stand-in for end-to-end runs without a chain. |
-| `cairn keygen --committee 3-of-4`, `cairn node --role party` | Keys and nodes for a flat committee (three-round protocol). |
+| `cairn identity`, `cairn dkg-party`, `cairn dkg` | Distributed key generation for a flat committee: no dealer. |
+| `cairn node --role party` | A committee party (three-round protocol). `cairn keygen --committee` is the dealer shortcut for tests. |
 | `cairn cluster-bench`, `committee-bench`, `remote-bench`, `bench` | Benchmarks: tower processes, committee processes, a running cluster, single process. |
 
 `cairn` with no arguments prints every flag.

@@ -24,6 +24,7 @@ sha2 = "0.10"
 ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc"] }
 rand = "0.8"
 rcgen = "0.13"
+ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }

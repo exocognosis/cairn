@@ -9,6 +9,7 @@
 
 pub mod cluster;
 pub mod coordinator;
+pub mod dkg;
 pub mod flat;
 pub mod node;
 pub mod policy;

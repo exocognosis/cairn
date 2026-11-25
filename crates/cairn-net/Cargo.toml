@@ -17,6 +17,7 @@ futures-util.workspace = true
 mpc-bridge = { path = "../mpc-bridge" }
 rand.workspace = true
 rcgen.workspace = true
+ring.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 serde.workspace = true

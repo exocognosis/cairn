@@ -490,3 +490,164 @@ fn stock_pqc_sidecar_signs_through_a_three_round_committee() {
         "pqc-sidecar verify rejects tampering"
     );
 }
+
+#[test]
+fn processes_generate_a_key_together_and_sign_with_it() {
+    use cairn_net::{NetPolicy as Policy, Peers};
+    use cairn_sidecar::cluster::CommitteeSigner;
+    let work = work_dir("dkg");
+    let _ = std::fs::remove_dir_all(&work);
+    let ports = free_ports(3).unwrap();
+    let base = ports[0];
+    let run = |args: &[&str]| {
+        let out = Command::new(CAIRN).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "cairn {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let keys = work.join("keys");
+    let (keys_s, base_s) = (keys.to_str().unwrap().to_owned(), base.to_string());
+    // Identities, roster and TLS for a 2-of-3 committee on consecutive ports.
+    run(&[
+        "committee-init",
+        "--out",
+        &keys_s,
+        "--committee",
+        "2-of-3",
+        "--base-port",
+        &base_s,
+    ]);
+    let roster = keys.join("roster.json");
+    let (peers_file, tls) = (keys.join("peers.json"), keys.join("tls"));
+    // Use three independently free ports rather than the consecutive ones init wrote.
+    let peers: Peers = (1..=3u8)
+        .zip(&ports)
+        .map(|(k, p)| (NodeId::Party(k), format!("127.0.0.1:{p}")))
+        .collect();
+    std::fs::write(&peers_file, cairn_net::cluster::peers_to_json(&peers)).unwrap();
+
+    // Three key-generation processes, then the driver.
+    let mut dkg_parties: Vec<Kill> = (1..=3)
+        .map(|k| {
+            let dir = keys.join(format!("party_{k}"));
+            Command::new(CAIRN)
+                .args([
+                    "dkg-party",
+                    "--id",
+                    &format!("party_{k}"),
+                    "--bind",
+                    &peers[&NodeId::Party(k as u8)],
+                ])
+                .arg("--roster")
+                .arg(&roster)
+                .arg("--identity")
+                .arg(dir.join("identity.pk8"))
+                .arg("--tls")
+                .arg(&tls)
+                .arg("--out")
+                .arg(&dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map(Kill)
+                .unwrap()
+        })
+        .collect();
+    for addr in peers.values() {
+        assert!(wait_for_port(addr, Duration::from_secs(20)));
+    }
+    let pk_file = work.join("public_key.hex");
+    run(&[
+        "dkg",
+        "--roster",
+        roster.to_str().unwrap(),
+        "--peers",
+        peers_file.to_str().unwrap(),
+        "--tls",
+        tls.to_str().unwrap(),
+        "--public-key-out",
+        pk_file.to_str().unwrap(),
+    ]);
+    for child in &mut dkg_parties {
+        assert!(
+            child.0.wait().unwrap().success(),
+            "a key-generation party failed"
+        );
+    }
+    let pk = hex::decode(std::fs::read_to_string(&pk_file).unwrap().trim()).unwrap();
+
+    // Every party ended with the same public key, its own share, and not the whole key.
+    let mut nodes = Vec::new();
+    for k in 1..=3u16 {
+        let dir = keys.join(format!("party_{k}"));
+        let committee = cairn_net::flat::read_committee(&dir.join("committee.bin")).unwrap();
+        assert_eq!(committee.pk.to_vec(), pk);
+        let share =
+            cairn_net::flat::read_party_share(&dir.join(format!("party_{k}.share"))).unwrap();
+        assert_eq!(
+            share.subsets().len(),
+            2,
+            "a 2-of-3 party holds two of the three subset secrets"
+        );
+        nodes.push(Kill(
+            Command::new(CAIRN)
+                .args([
+                    "node",
+                    "--role",
+                    "party",
+                    "--id",
+                    &format!("party_{k}"),
+                    "--bind",
+                    &peers[&NodeId::Party(k as u8)],
+                ])
+                .arg("--peers")
+                .arg(&peers_file)
+                .arg("--committee")
+                .arg(dir.join("committee.bin"))
+                .arg("--tls")
+                .arg(&tls)
+                .arg("--share")
+                .arg(dir.join(format!("party_{k}.share")))
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        ));
+    }
+    for addr in peers.values() {
+        assert!(wait_for_port(addr, Duration::from_secs(20)));
+    }
+
+    // Sign a checkpoint with the jointly generated key.
+    let key = std::sync::Arc::new(
+        cairn_net::flat::read_committee(&keys.join("party_1/committee.bin")).unwrap(),
+    );
+    let tls_id =
+        std::sync::Arc::new(cairn_net::TlsIdentity::load(&tls, NodeId::Coordinator).unwrap());
+    let mut signer = CommitteeSigner::new(
+        key,
+        peers,
+        Policy {
+            round_timeout: Duration::from_secs(5),
+            ..Policy::default()
+        },
+        tls_id,
+    )
+    .unwrap();
+    let message = cairn_net::policy::Checkpoint {
+        chain: "cosmos:cairn-test-1".into(),
+        epoch: 1,
+        height: 100,
+        block_hash: vec![1; 32],
+        finality_commitment: vec![2; 32],
+        key_id: cairn_net::policy::key_id(&pk),
+    }
+    .message();
+    let (signature, _) = signer.sign_with_report(&message).unwrap();
+    assert!(
+        off_the_shelf_verify(&pk, &message, &signature),
+        "RustCrypto ml-dsa accepts a signature under the generated key"
+    );
+}

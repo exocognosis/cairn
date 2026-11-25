@@ -364,6 +364,20 @@ A second execution path with no MPC backend and no root engines (`cairn-net::fla
 each party holds the secrets of the subsets it belongs to. Any `T` parties hold all of them
 between them; any `T - 1` miss at least one. The public key is a standard ML-DSA-65 key.
 
+**Key generation without a dealer** (`cairn-net::dkg`, the paper's Appendix D). Each subset's
+lowest-indexed member picks a seed and shares it with the subset; all parties commit to and
+reveal public randomness `R`; every member derives the subset's secret as `H(S, seed, R)`, so
+no single party chooses it; leaders publish `t_S = A s1_S + s2_S` behind commitments, which the
+other members of the subset check against their own computation; the public key is the sum of
+the `t_S`; and every party signs the transcript with its long-term Ed25519 identity, so a relay
+that showed parties different messages is caught.
+
+cairn adds a round 0 and end-to-end encryption because its parties talk through a coordinator:
+each party first publishes fresh X25519 keys signed by its identity, and seeds travel under
+X25519, HKDF-SHA256 and ChaCha20-Poly1305. The coordinator and the TLS certificate authority
+see only ciphertext. What must exist beforehand is each party's identity key and a roster of
+everyone's public identity keys, exchanged out of band.
+
 **One execution**, for an active set of exactly `T` parties, with `K` parallel repetitions:
 
 ```
@@ -413,7 +427,7 @@ binds loopback only. The hop is authenticated but not encrypted.
 **Differences from the tower path.** The mask is sampled, not `ExpandMask`, so signatures are
 valid but not deterministic. Security rests on the paper's argument (dishonest majority, up to
 `T - 1` corruptions), which this prototype has not been checked against in detail. Key
-generation here is by a dealer; the paper also gives a distributed one.
+generation is the paper's distributed protocol (above); a dealer shortcut remains for tests.
 
 ## 11. What is not solved
 

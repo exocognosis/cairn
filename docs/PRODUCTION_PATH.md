@@ -259,3 +259,10 @@ Without funding for review, the work now follows [BLOCKERS.md](BLOCKERS.md), whi
 known blocker and its status. Done in this pass: SigV4 verification on the KMS endpoint and a
 loopback-only rule without credentials; a signing policy enforced by each party with
 persisted protection against conflicting or older checkpoints; audit logs.
+
+## Update: no dealer
+
+`cairn dkg` implements the paper's distributed key generation for the committee path, relayed
+through the coordinator with end-to-end encrypted seeds. A committee of separate processes
+generates its key and signs with it in the tests, and `scripts/run_local_committee.sh` uses it
+by default. Remaining trust in setup: exchanging identity public keys, and the TLS authority.

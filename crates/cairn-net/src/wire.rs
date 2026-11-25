@@ -129,6 +129,8 @@ pub enum Body {
     Finish,
     /// Drop the session and erase its state.
     Abort,
+    /// One step of distributed key generation (an encoded `dkg::Step`).
+    Dkg(Vec<u8>),
     /// Three-round protocol, round 1, ahead of any request: sample masks and commit to them.
     Presign,
     /// Round 2: sign `message` with the masks committed as `presign`; here are everyone's
@@ -148,6 +150,8 @@ pub enum Body {
     Ready {
         binding: [u8; 32],
     },
+    /// The party's message for that step (encoded), or the public key after the last one.
+    DkgReply(Vec<u8>),
     PresignCommit {
         id: [u8; 32],
         commitment: [u8; 32],
@@ -205,6 +209,8 @@ impl Body {
             Body::Finish => "Finish",
             Body::Abort => "Abort",
             Body::Presign => "Presign",
+            Body::Dkg(_) => "Dkg",
+            Body::DkgReply(_) => "DkgReply",
             Body::M2 { .. } => "M2",
             Body::M3 { .. } => "M3",
             Body::PresignCommit { .. } => "PresignCommit",

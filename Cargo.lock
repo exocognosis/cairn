@@ -59,6 +59,7 @@ dependencies = [
  "mpc-bridge",
  "rand",
  "rcgen",
+ "ring",
  "rustls",
  "rustls-pemfile",
  "serde",
