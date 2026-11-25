@@ -5,6 +5,15 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Rebuild the archives for an existing tag, for example after a runner image is retired.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build
+        required: true
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 permissions:
   contents: write
@@ -20,16 +29,18 @@ jobs:
         include:
           - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - run: cargo build --release --locked -p cairn-sidecar --target ${{ matrix.target }}
       - name: Package
         run: |
-          name="cairn-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="cairn-${TAG}-${{ matrix.target }}"
           mkdir "$name"
           cp "target/${{ matrix.target }}/release/cairn" README.md LICENSE "$name/"
           tar -czf "$name.tar.gz" "$name"
@@ -38,6 +49,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
-          gh release upload "$GITHUB_REF_NAME" cairn-*.tar.gz cairn-*.tar.gz.sha256 --clobber
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" cairn-*.tar.gz cairn-*.tar.gz.sha256 --clobber
