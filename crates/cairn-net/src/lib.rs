@@ -9,12 +9,14 @@
 
 pub mod cluster;
 pub mod coordinator;
+pub mod flat;
 pub mod node;
 pub mod tls;
 pub mod transport;
 pub mod wire;
 
 pub use coordinator::{Coordinator, NetError, NetFault, NetFaultKind, NetPolicy, NetReport};
+pub use flat::{FlatCoordinator, LocalCommittee, PartyNode};
 pub use node::{FaultMode, Peers, RootNode, SignerNode, CHECKPOINT_DOMAIN};
 pub use tls::{ClusterTls, TlsIdentity};
 pub use transport::{CallError, Link};

@@ -95,6 +95,94 @@ pub struct PartyKey {
     shares: BTreeMap<Subset, (PolyVec, PolyVec)>,
 }
 
+fn flat(v: &PolyVec) -> Vec<i32> {
+    v.iter().flatten().copied().collect()
+}
+
+fn polys(flat: &[i32], count: usize) -> Option<PolyVec> {
+    (flat.len() == count * N && flat.iter().all(|c| (0..fips204::Q).contains(c))).then(|| {
+        flat.chunks(N)
+            .map(|c| c.try_into().expect("whole polynomial"))
+            .collect()
+    })
+}
+
+/// `w` of one repetition (`K` polynomials) to and from its flat wire form.
+pub fn w_to_wire(w: &PolyVec) -> Vec<i32> {
+    flat(w)
+}
+
+pub fn w_from_wire(v: &[i32]) -> Option<PolyVec> {
+    polys(v, K)
+}
+
+/// `z1` of one repetition (`L` polynomials) to and from its flat wire form.
+pub fn z_to_wire(z: &PolyVec) -> Vec<i32> {
+    flat(z)
+}
+
+pub fn z_from_wire(v: &[i32]) -> Option<PolyVec> {
+    polys(v, L)
+}
+
+impl GroupKey {
+    /// Public group description for distribution to every node (no secrets).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serialize(&(
+            self.params.t as u8,
+            self.params.n as u8,
+            self.pk.to_vec(),
+            flat(&self.t1),
+        ))
+        .expect("group key encodes")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let (t, n, pk, t1): (u8, u8, Vec<u8>, Vec<i32>) = bincode::deserialize(bytes).ok()?;
+        let pk: [u8; PUBLIC_KEY_BYTES] = pk.try_into().ok()?;
+        let rho: [u8; 32] = pk[..32].try_into().ok()?;
+        let mut tr = [0u8; 64];
+        shake256(&[&pk], &mut tr);
+        Some(Self {
+            pk,
+            rho,
+            tr,
+            t1: polys(&t1, K)?,
+            params: params_65(t as usize, n as usize)?,
+            a_hat: expand_a(&rho),
+        })
+    }
+}
+
+type ShareWire = Vec<(Subset, Vec<i32>, Vec<i32>)>;
+
+impl PartyKey {
+    /// Serialize for a share file. The bytes are this party's long-term secret.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let shares: ShareWire = self
+            .shares
+            .iter()
+            .map(|(s, (a, b))| (s.clone(), flat(a), flat(b)))
+            .collect();
+        bincode::serialize(&(self.index, shares)).expect("share encodes")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let (index, wire): (u8, ShareWire) = bincode::deserialize(bytes).ok()?;
+        let mut shares = BTreeMap::new();
+        for (subset, a, b) in wire {
+            shares.insert(subset, (polys(&a, L)?, polys(&b, K)?));
+        }
+        Some(Self { index, shares })
+    }
+}
+
+impl Round1 {
+    pub fn index(&self) -> u8 {
+        self.index
+    }
+}
+
 fn short_poly<R: Rng + CryptoRng>(rng: &mut R) -> Poly {
     std::array::from_fn(|_| red(rng.gen_range(-4i64..=4)))
 }
@@ -356,6 +444,37 @@ pub fn combine(
         }
     }
     None
+}
+
+/// True when some repetition was answered by every party and its summed response does not
+/// satisfy the signing equation, i.e. `w - (A z1 - 2^d c t1)` is far outside what honest
+/// parties can produce. Honest executions fail only on the public bounds.
+pub fn equation_fails(
+    key: &GroupKey,
+    message: &[u8],
+    revealed: &BTreeMap<u8, Vec<PolyVec>>,
+    responses: &BTreeMap<u8, Vec<Option<PolyVec>>>,
+) -> bool {
+    let mu = message_representative(&key.tr, &[], message);
+    let t1_shifted: PolyVec = key
+        .t1
+        .iter()
+        .map(|p| p.map(|x| red((x as i64) << D)))
+        .collect();
+    (0..key.params.reps).any(|rep| {
+        let Some(z1) = responses.values().try_fold(vec_zero(L), |acc, r| {
+            Some(vec_add(&acc, r.get(rep)?.as_ref()?))
+        }) else {
+            return false;
+        };
+        let c = sample_in_ball(&challenge(&mu, revealed, rep));
+        let approx = vec_sub(
+            &mat_vec_coeff(&key.a_hat, &z1),
+            &challenge_mul(&c, &t1_shifted),
+        );
+        // delta = z2 - c t0: honestly below about 2^18; a wrong response makes it uniform.
+        inf_norm(&vec_sub(&aggregate_w(revealed, rep), &approx)) > 4 * GAMMA2
+    })
 }
 
 /// What one in-process signature cost.

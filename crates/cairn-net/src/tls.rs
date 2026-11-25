@@ -27,6 +27,7 @@ pub fn dns_name(id: NodeId) -> String {
         NodeId::Coordinator => "coordinator.cairn".into(),
         NodeId::Signer { leaf, signer } => format!("leaf-{leaf}-signer-{signer}.cairn"),
         NodeId::Root(k) => format!("root-{k}.cairn"),
+        NodeId::Party(k) => format!("party-{k}.cairn"),
     }
 }
 

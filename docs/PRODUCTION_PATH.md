@@ -158,5 +158,27 @@ What the prototype is not: a secure implementation. Floating-point sampling, a t
 no distributed key generation, no network path, not constant time, and written from the paper
 without comparison against the authors' code.
 
-Next: put the three rounds on the existing node and TLS transport (signers talk to each other
-through the coordinator; no root engines), then measure across hosts.
+## Update: on the network
+
+The three rounds now run between separate party processes over the existing mutual-TLS
+transport, relayed by the coordinator (`cairn-net::flat`), and `cairn serve-kms --committee`
+exposes a committee behind the KMS interface. A stock pqc-sidecar signs a live checkpoint
+through a 3-of-4 committee of processes and the unmodified verifier accepts the certificate.
+
+Measured with each party as its own OS process on one Apple M3, 100 certificates per row,
+injected round-trip time on every link (`cairn committee-bench`):
+
+| RTT | committee | latency ms (mean / p50 / p95 / max) | executions (mean) | kB per party per cert |
+|---|---|---|---|---|
+| localhost | 2-of-3 | 38 / 34 / 84 / 150 | 2.26 | 234 |
+| localhost | 3-of-4 | 88 / 50 / 198 / 246 | 1.77 | 945 |
+| localhost | 3-of-5 | 316 / 271 / 821 / 1,360 | 2.31 | 3,745 |
+| 50 ms | 2-of-3 | 391 / 370 / 958 / 1,537 | 2.04 | 211 |
+| 50 ms | 3-of-4 | 482 / 470 / 1,196 / 1,688 | 2.02 | 1,077 |
+| 50 ms | 3-of-5 | 685 / 636 / 1,279 / 2,239 | 2.15 | 3,487 |
+
+So the 2 to 3 s target is met with room to spare at 50 ms for these committees, on one
+machine. Not yet done: a run across real hosts; packing `w` and `z1` (traffic is about three
+times what it needs to be, and round 3 sends every party all the openings); distributed key
+generation; request authentication on the KMS endpoint; any review of the implementation
+against the paper's security argument.

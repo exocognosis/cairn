@@ -31,6 +31,9 @@ Terms as this repository uses them, roughly in the order you meet them.
 | **`kappa`** | The attempt counter that feeds `ExpandMask`; it advances by 5 per rejected attempt. |
 | **Forging bound / blocking bound** | The fewest signers whose shares give the key (9 of 16) and the fewest whose absence stops signing (4 of 16). |
 | **Identifiable abort** | When a protocol run fails, the party responsible can be named and excluded. |
+| **Flat committee / party** | One committee of up to six nodes (`party_k`) running the three-round protocol directly, with no tower, root engines or MPC backend. |
+| **Three-round protocol** | The threshold ML-DSA protocol of *Efficient Threshold ML-DSA* (USENIX Security 2026, "Mithril"): commit to masks, reveal, respond. Signatures verify under FIPS 204 but are not the deterministic ones. |
+| **Execution** | One run of the three rounds. It yields a signature about half the time, so a signature takes about two. |
 | **Trusted dealer** | A single machine that generates the key and hands out shares. cairn v2 uses one. |
 | **KMS-compatible endpoint** | cairn answers the two AWS KMS calls pqc-sidecar already knows how to make, which is how the stock daemon signs through cairn. |
 | **RTT** | Round-trip time of a network link. |

@@ -356,3 +356,21 @@ instead of the max-flow optimum, `f64` hyperball sampling, trusted dealer only.
 grows fast with the threshold, so the first deployable shape is one committee of up to six
 operators with a small threshold. How leaf committees compose into a tower under this protocol
 is open (docs/PRODUCTION_PATH.md, step 3).
+
+**D-70. The three-round protocol runs through the coordinator (star topology).** Parties do not
+connect to each other; the coordinator relays commitments and openings, all public. This reuses
+the existing transport and keeps parties behind one inbound connection each. The cost is that
+the coordinator can stall or spoil an execution, which it could already do.
+
+**D-71. Masks are single-use, enforced at the party.** A party reveals once and answers once
+per session, erasing the masks when it answers and discarding the session on any inconsistent
+request. Reusing a mask under two challenges reveals the share, so this is enforced where the
+secret lives, not at the coordinator.
+
+**D-72. Wrong responses rotate the signing set.** The protocol gives no way to name the party
+whose response was wrong. The coordinator distinguishes an honest failure (public bounds) from
+a wrong response (the signing equation is off by a large amount) and rotates the active set in
+the second case.
+
+**D-73. `w` and `z1` travel unpacked.** Four bytes per coefficient on the wire, where 23 and 20
+bits would do. Simpler now; about a third of the traffic can be recovered later.

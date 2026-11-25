@@ -354,6 +354,47 @@ So v2 moves the session-time trust from "nine signers in the right places" to "t
 corruption threshold among the engines". The tower still governs the shares at rest, who must
 cooperate to start a session, and who can block one.
 
+### 10.7 The flat committee (three-round protocol)
+
+A second execution path with no MPC backend and no root engines (`cairn-net::flat`,
+`threshold-mldsa::mithril`). It implements the protocol of *Efficient Threshold ML-DSA*
+(USENIX Security 2026) for one committee of `T`-of-`N`, `N <= 6`.
+
+**Keys.** One short ML-DSA secret per subset of `N - T + 1` parties; the key is their sum, and
+each party holds the secrets of the subsets it belongs to. Any `T` parties hold all of them
+between them; any `T - 1` miss at least one. The public key is a standard ML-DSA-65 key.
+
+**One execution**, for an active set of exactly `T` parties, with `K` parallel repetitions:
+
+```
+coordinator                                   parties (T active)
+   | -- M1{message} --------------------------> |  sample K masks in a hyperball,
+   | <------------ M1Commit{H(w_1..w_K)} ------ |  w = A r1 + r2
+   | -- M2{all commitments} ------------------> |  check own commitment is in the set
+   | <------------ M2Reveal{w_1..w_K} --------- |
+   | -- M3{all w} ----------------------------> |  check every w against its commitment;
+   | <------------ M3Response{z1 or none, xK} - |  per repetition: c from the summed w,
+   |                                            |  z = c s_part + r, answer if ||z|| <= r
+   | combine: first repetition all answered; hint from public values; verify
+```
+
+The signature is `(c~, sum of z1, hint)` in the standard encoding. An execution yields one
+about half the time; the coordinator then starts a new execution with a fresh session.
+
+**What the coordinator sees** is public: commitments, `w` values, and responses that passed
+each party's own rejection test. It holds no share. It can make an execution fail by relaying
+inconsistently; it cannot obtain a second answer under the same mask, because a party erases a
+session's masks when it answers round 3 and refuses a repeated round 2.
+
+**Faults.** A silent or refusing party is excluded and another takes its place while more than
+`T` remain. A wrong response is detected (the summed response fails the signing equation) but
+the protocol cannot say whose it was, so the coordinator rotates the active set.
+
+**Differences from the tower path.** The mask is sampled, not `ExpandMask`, so signatures are
+valid but not deterministic. Security rests on the paper's argument (dishonest majority, up to
+`T - 1` corruptions), which this prototype has not been checked against in detail. Key
+generation here is by a dealer; the paper also gives a distributed one.
+
 ## 11. What is not solved
 
 1. **A malicious-secure MPC backend.** The MP-SPDZ program runs and matches the reference with

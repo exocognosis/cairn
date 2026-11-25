@@ -38,6 +38,11 @@ Multi-process cluster:
              [--share <file>]            (signer)
              [--mpc-socket-dir <dir>]    (root: MPC backend party sockets)
              [--round-timeout-ms <n>] [--mpc-timeout-ms <n>] [--link-delay-ms <n>] [--fault <mode>]
+  cairn keygen --out <dir> --committee <T-of-N>      (flat committee, three-round protocol)
+  cairn node --role party --id party_<k> --bind <addr:port> --peers <peers.json>
+             --committee <committee.bin> --tls <dir> --share <file>
+  cairn serve-kms --committee <committee.bin> --peers <peers.json> --tls <dir> [--listen ...]
+  cairn committee-bench [--committees 2-of-3,3-of-4] [--signatures <n>] [--rtt-ms <a,b>]
   cairn mpc-worker --socket-dir <dir>
       Reference three-party MPC backend (clear text, NOT a secure computation).
   cairn serve-kms [--listen <addr:port>] [--public-key-out <file>]
@@ -232,6 +237,33 @@ fn run(args: &[String]) -> Result<(), String> {
             let listen = arg(args, "--listen").unwrap_or_else(|| "127.0.0.1:8200".into());
             let pk_out = arg(args, "--public-key-out").map(PathBuf::from);
             let endpoint = match peers(args)? {
+                Some(peers) if arg(args, "--committee").is_some() => {
+                    let file = arg(args, "--committee").ok_or("--committee <committee.bin>")?;
+                    let key = Arc::new(
+                        cairn_net::flat::read_committee(&PathBuf::from(file))
+                            .map_err(|e| e.to_string())?,
+                    );
+                    let policy = NetPolicy {
+                        round_timeout: Duration::from_millis(ms(args, "--round-timeout-ms", 5000)?),
+                        link_delay: Duration::from_millis(ms(args, "--link-delay-ms", 0)?),
+                        ..NetPolicy::default()
+                    };
+                    if let Some(path) = &pk_out {
+                        write_public_key(path, &key.pk).map_err(|e| e.to_string())?;
+                    }
+                    eprintln!(
+                        "cairn: signing through a {}-of-{} committee (three-round protocol)",
+                        key.params.t, key.params.n
+                    );
+                    let signer = cairn_sidecar::cluster::CommitteeSigner::new(
+                        key,
+                        peers,
+                        policy,
+                        tls(args, NodeId::Coordinator)?,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    kms::serve(&listen, signer)
+                }
                 Some(peers) => {
                     let file = arg(args, "--group").ok_or("--peers needs --group <group.bin>")?;
                     let group =
@@ -283,6 +315,27 @@ fn run(args: &[String]) -> Result<(), String> {
             let base: u16 = arg(args, "--base-port")
                 .map_or(Ok(7100), |v| v.parse())
                 .map_err(|_| "bad --base-port")?;
+            if let Some(spec) = arg(args, "--committee") {
+                // A flat committee for the three-round protocol: "--committee 3-of-4".
+                let (t, n) = spec
+                    .split_once("-of-")
+                    .and_then(|(t, n)| Some((t.parse::<usize>().ok()?, n.parse::<usize>().ok()?)))
+                    .ok_or("--committee expects T-of-N, for example 3-of-4")?;
+                let (key, parties) = threshold_mldsa::mithril::keygen(t, n, &mut OsRng)
+                    .ok_or("no parameter set for that committee (N at most 6)")?;
+                cairn_net::flat::write_flat_keys(&out, &key, &parties)
+                    .map_err(|e| format!("writing keys: {e}"))?;
+                let peers = cairn_net::flat::flat_peers(n, &host, base);
+                std::fs::write(out.join("peers.json"), net::peers_to_json(&peers))
+                    .map_err(|e| e.to_string())?;
+                write_public_key(&out.join("public_key.hex"), &key.pk)
+                    .map_err(|e| e.to_string())?;
+                println!(
+                    "{}",
+                    json!({ "out": out, "committee": spec, "nodes": peers.len(), "key_id": hex::encode(cairn_sidecar::key_id(&key.pk)) })
+                );
+                return Ok(());
+            }
             let (group, shares) = threshold_mldsa::deal(&seed(args)?, params.tiers(), &mut OsRng)
                 .map_err(|e| e.to_string())?;
             net::write_keys(&out, &group, &shares).map_err(|e| format!("writing keys: {e}"))?;
@@ -301,6 +354,40 @@ fn run(args: &[String]) -> Result<(), String> {
             let role = arg(args, "--role").ok_or("node needs --role signer|root")?;
             let bind = arg(args, "--bind").ok_or("node needs --bind <addr:port>")?;
             let peers = peers(args)?.ok_or("node needs --peers")?;
+            if role == "party" {
+                let NodeId::Party(_) = id else {
+                    return Err(format!("--role party does not match --id {id}"));
+                };
+                let key = cairn_net::flat::read_committee(&PathBuf::from(
+                    arg(args, "--committee").ok_or("a party needs --committee <committee.bin>")?,
+                ))
+                .map_err(|e| e.to_string())?;
+                let share = cairn_net::flat::read_party_share(&PathBuf::from(
+                    arg(args, "--share").ok_or("a party needs --share <file>")?,
+                ))
+                .map_err(|e| e.to_string())?;
+                if NodeId::Party(share.index + 1) != id {
+                    return Err(format!("share file is for another party than {id}"));
+                }
+                let delay = Duration::from_millis(ms(args, "--link-delay-ms", 0)?);
+                let fault: FaultMode =
+                    arg(args, "--fault").map_or(Ok(FaultMode::None), |f| f.parse())?;
+                let identity = tls(args, id)?;
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                let _ = peers;
+                return runtime.block_on(async {
+                    let listener = tokio::net::TcpListener::bind(&bind)
+                        .await
+                        .map_err(|e| format!("bind {bind}: {e}"))?;
+                    eprintln!("cairn node {id}: committee party on {bind}");
+                    let node = cairn_net::PartyNode::new(id, Arc::new(key), share, fault);
+                    cairn_net::flat::run_party(listener, node, delay, identity).await;
+                    Ok(())
+                });
+            }
             let group = Arc::new(
                 net::read_group(&PathBuf::from(
                     arg(args, "--group").ok_or("node needs --group")?,
@@ -520,6 +607,78 @@ fn run(args: &[String]) -> Result<(), String> {
                     bytes as f64 / 1e3
                 );
             }
+            Ok(())
+        }
+        Some("committee-bench") => {
+            use cairn_sidecar::cluster::{CommitteeSigner, ProcessCommittee};
+            let n_sig: u32 = arg(args, "--signatures")
+                .map_or(Ok(100), |v| v.parse())
+                .map_err(|_| "bad --signatures")?;
+            let rtts: Vec<u64> = arg(args, "--rtt-ms")
+                .unwrap_or_else(|| "0,50".into())
+                .split(',')
+                .map(|v| v.trim().parse().map_err(|_| "bad --rtt-ms"))
+                .collect::<Result<_, _>>()?;
+            let shapes: Vec<(usize, usize)> = arg(args, "--committees")
+                .unwrap_or_else(|| "2-of-3,3-of-4,3-of-5".into())
+                .split(',')
+                .map(|c| {
+                    c.split_once("-of-")
+                        .and_then(|(t, n)| Some((t.parse().ok()?, n.parse().ok()?)))
+                        .ok_or("bad --committees")
+                })
+                .collect::<Result<_, _>>()?;
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let work =
+                std::env::temp_dir().join(format!("cairn-committee-bench-{}", std::process::id()));
+            println!("| RTT ms | committee | certs | latency ms (mean / p50 / p95 / max) | executions (mean) | kB per party per cert |\n|---|---|---|---|---|---|");
+            for rtt in rtts {
+                for (t, n) in &shapes {
+                    let committee = ProcessCommittee::spawn(
+                        &exe,
+                        &work.join(format!("{t}-{n}-{rtt}")),
+                        *t,
+                        *n,
+                        &[],
+                        rtt / 2,
+                        5000,
+                    )
+                    .map_err(|e| format!("spawning the committee: {e}"))?;
+                    let policy = NetPolicy {
+                        round_timeout: Duration::from_millis(5000),
+                        link_delay: Duration::from_millis(rtt / 2),
+                        ..NetPolicy::default()
+                    };
+                    let tls = committee.coordinator_tls().map_err(|e| e.to_string())?;
+                    let mut signer = CommitteeSigner::new(
+                        committee.key.clone(),
+                        committee.peers.clone(),
+                        policy,
+                        tls,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let (mut ms_all, mut execs, mut bytes) = (Vec::new(), 0.0, 0.0);
+                    for i in 0..n_sig {
+                        let message = format!("pqc-sidecar/checkpoint/v2 bench {i}").into_bytes();
+                        let (_, report) = signer.sign_with_report(&message)?;
+                        ms_all.push(report.elapsed.as_secs_f64() * 1e3);
+                        execs += report.rejections as f64 + 1.0;
+                        bytes += report.coordinator_bytes.values().sum::<u64>() as f64 / *t as f64;
+                    }
+                    ms_all.sort_by(|a, b| a.total_cmp(b));
+                    let at = |q: f64| ms_all[((ms_all.len() - 1) as f64 * q).round() as usize];
+                    println!(
+                        "| {rtt} | {t}-of-{n} | {n_sig} | {:.0} / {:.0} / {:.0} / {:.0} | {:.2} | {:.0} |",
+                        ms_all.iter().sum::<f64>() / ms_all.len() as f64,
+                        at(0.5),
+                        at(0.95),
+                        at(1.0),
+                        execs / n_sig as f64,
+                        bytes / n_sig as f64 / 1e3
+                    );
+                }
+            }
+            let _ = std::fs::remove_dir_all(&work);
             Ok(())
         }
         _ => Err(USAGE.into()),

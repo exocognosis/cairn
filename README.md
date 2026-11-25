@@ -60,19 +60,44 @@ list and [ROADMAP.md](ROADMAP.md) says what closing each gap takes.
 
 ## New direction: a second, much faster protocol (prototype)
 
-Recent work shows the secret mask does not have to be computed inside an MPC at all. The
-repository now also contains a prototype of the three-round protocol of *Efficient Threshold
-ML-DSA* (USENIX Security 2026): no MPC, a few hundred milliseconds of compute, and signatures
+Recent work shows the secret mask does not have to be computed inside an MPC at all. cairn now
+also implements the three-round protocol of *Efficient Threshold ML-DSA* (USENIX Security
+2026) for one committee of up to six parties: no MPC backend, no root engines, and signatures
 that the same unmodified verifiers accept. They are valid ML-DSA-65 signatures, but not the
-ones a deterministic FIPS 204 signer would produce. It runs in one process only for now.
+ones a deterministic FIPS 204 signer would produce.
+
+It runs as separate processes over mutual TLS, and a stock pqc-sidecar signs through it
+(`stock_pqc_sidecar_signs_through_a_three_round_committee`). 100 certificates per row, one
+Apple M3, each party its own process, injected round-trip time on every link:
+
+| RTT | committee | latency ms (mean / p50 / p95 / max) | executions (mean) | kB per party per cert |
+|---|---|---|---|---|
+| localhost | 2-of-3 | 38 / 34 / 84 / 150 | 2.26 | 234 |
+| localhost | 3-of-4 | 88 / 50 / 198 / 246 | 1.77 | 945 |
+| localhost | 3-of-5 | 316 / 271 / 821 / 1,360 | 2.31 | 3,745 |
+| 50 ms | 2-of-3 | 391 / 370 / 958 / 1,537 | 2.04 | 211 |
+| 50 ms | 3-of-4 | 482 / 470 / 1,196 / 1,688 | 2.02 | 1,077 |
+| 50 ms | 3-of-5 | 685 / 636 / 1,279 / 2,239 | 2.15 | 3,487 |
+
+For comparison, the tower design at 50 ms takes about 1 s with a clear-text stand-in for its
+MPC and took 21 s across two hosts with the real one. These committee numbers include all of
+the cryptography; there is nothing left to substitute.
+
+```bash
+./scripts/run_local_committee.sh --committee 3-of-4
+```
 
 ```bash
 cargo run --release -p cairn-sidecar -- mithril-demo --threshold 3 --parties 4
 ```
 
-[docs/PRODUCTION_PATH.md](docs/PRODUCTION_PATH.md) has the comparison, the measurements and
-what is missing. Everything below describes the original design, which remains the "exact
-FIPS 204 signer" mode.
+**It is a prototype, not a secure implementation**: written from the paper without comparison
+against the authors' code, floating-point sampling, a trusted dealer, not constant time, not
+run across real hosts yet, and traffic is about three times larger than it needs to be because
+values travel unpacked. Cost also rises steeply with the threshold, so small thresholds are the
+practical range. [docs/PRODUCTION_PATH.md](docs/PRODUCTION_PATH.md) has the comparison and what
+is missing; ARCHITECTURE.md section 10.7 has the protocol. Everything below describes the
+original tower design, which remains the "exact FIPS 204 signer" mode.
 
 ## Try it in five minutes
 
@@ -277,7 +302,8 @@ interval = 100   # checkpoint cadence: every K finalized blocks
 | `cairn mpc-worker --socket-dir <dir>` | Run the stand-in MPC backend (clear text, for testing). |
 | `cairn serve-kms ...` | Coordinate signing and expose it as a KMS-compatible endpoint for pqc-sidecar. |
 | `cairn mock-chain` | A minimal CometBFT RPC stand-in for end-to-end runs without a chain. |
-| `cairn cluster-bench`, `remote-bench`, `bench` | Benchmarks: local processes, a running cluster, single process. |
+| `cairn keygen --committee 3-of-4`, `cairn node --role party` | Keys and nodes for a flat committee (three-round protocol). |
+| `cairn cluster-bench`, `committee-bench`, `remote-bench`, `bench` | Benchmarks: tower processes, committee processes, a running cluster, single process. |
 
 `cairn` with no arguments prints every flag.
 

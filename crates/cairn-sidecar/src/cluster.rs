@@ -407,3 +407,148 @@ pub fn sidecar_config(
         work.join("certs").display(),
     )
 }
+
+/// Signs by coordinating a flat committee (the three-round protocol) over TLS.
+pub struct CommitteeSigner {
+    runtime: tokio::runtime::Runtime,
+    coordinator: cairn_net::FlatCoordinator,
+}
+
+impl CommitteeSigner {
+    pub fn new(
+        key: Arc<threshold_mldsa::mithril::GroupKey>,
+        peers: Peers,
+        policy: NetPolicy,
+        tls: Arc<TlsIdentity>,
+    ) -> std::io::Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?;
+        Ok(Self {
+            runtime,
+            coordinator: cairn_net::FlatCoordinator::new(key, peers, policy, tls),
+        })
+    }
+
+    pub fn sign_with_report(
+        &mut self,
+        message: &[u8],
+    ) -> Result<([u8; SIGNATURE_BYTES], NetReport), String> {
+        self.runtime
+            .block_on(self.coordinator.sign(message))
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl KmsSigner for CommitteeSigner {
+    fn public_key(&self) -> [u8; PUBLIC_KEY_BYTES] {
+        self.coordinator.key().pk
+    }
+
+    fn sign(&mut self, message: &[u8]) -> Result<[u8; SIGNATURE_BYTES], String> {
+        self.sign_with_report(message)
+            .map(|(signature, _)| signature)
+    }
+}
+
+/// A flat committee as real OS processes on loopback: one `cairn node --role party` each.
+pub struct ProcessCommittee {
+    pub dir: PathBuf,
+    pub key: Arc<threshold_mldsa::mithril::GroupKey>,
+    pub peers: Peers,
+    pub peers_file: PathBuf,
+    pub committee_file: PathBuf,
+    pub tls_dir: PathBuf,
+    children: Vec<Child>,
+}
+
+impl ProcessCommittee {
+    pub fn spawn(
+        exe: &Path,
+        dir: &Path,
+        t: usize,
+        n: usize,
+        faults: &[(NodeId, FaultMode)],
+        link_delay_ms: u64,
+        round_timeout_ms: u64,
+    ) -> std::io::Result<Self> {
+        use cairn_net::flat::{party_share_file, write_flat_keys};
+        let (key, parties) = threshold_mldsa::mithril::keygen(t, n, &mut rand::rngs::OsRng)
+            .ok_or_else(|| std::io::Error::other("no parameter set for that committee"))?;
+        let keys = dir.join("keys");
+        let _ = std::fs::remove_dir_all(dir);
+        write_flat_keys(&keys, &key, &parties)?;
+        drop(parties);
+        let ports = free_ports(n)?;
+        let peers: Peers = (1..=n as u8)
+            .zip(&ports)
+            .map(|(k, p)| (NodeId::Party(k), format!("127.0.0.1:{p}")))
+            .collect();
+        let peers_file = dir.join("peers.json");
+        std::fs::write(&peers_file, peers_to_json(&peers))?;
+        let mut committee = Self {
+            dir: dir.to_path_buf(),
+            key: Arc::new(key),
+            peers: peers.clone(),
+            peers_file,
+            committee_file: keys.join("committee.bin"),
+            tls_dir: keys.join("tls"),
+            children: Vec::new(),
+        };
+        for (id, addr) in &peers {
+            let fault = faults
+                .iter()
+                .find(|(f, _)| f == id)
+                .map(|(_, m)| *m)
+                .unwrap_or_default();
+            let log = std::fs::File::create(dir.join(format!("{id}.log"))).map(Stdio::from)?;
+            committee.children.push(
+                Command::new(exe)
+                    .args([
+                        "node",
+                        "--role",
+                        "party",
+                        "--id",
+                        &id.to_string(),
+                        "--bind",
+                        addr,
+                    ])
+                    .arg("--peers")
+                    .arg(&committee.peers_file)
+                    .arg("--committee")
+                    .arg(&committee.committee_file)
+                    .arg("--tls")
+                    .arg(&committee.tls_dir)
+                    .arg("--share")
+                    .arg(party_share_file(&keys, *id))
+                    .args(["--fault", fault_name(fault)])
+                    .args(["--link-delay-ms", &link_delay_ms.to_string()])
+                    .args(["--round-timeout-ms", &round_timeout_ms.to_string()])
+                    .stderr(log)
+                    .spawn()?,
+            );
+        }
+        for addr in peers.values() {
+            if !wait_for_port(addr, Duration::from_secs(20)) {
+                return Err(std::io::Error::other(format!(
+                    "party on {addr} did not start"
+                )));
+            }
+        }
+        Ok(committee)
+    }
+
+    pub fn coordinator_tls(&self) -> std::io::Result<Arc<TlsIdentity>> {
+        TlsIdentity::load(&self.tls_dir, NodeId::Coordinator).map(Arc::new)
+    }
+}
+
+impl Drop for ProcessCommittee {
+    fn drop(&mut self) {
+        for c in &mut self.children {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
