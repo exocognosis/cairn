@@ -54,11 +54,11 @@ async fn committees_sign_standard_signatures_over_the_network() {
             ));
             assert_eq!(report.signers.len(), t);
             assert!(report.faults.is_empty() && report.retries == 0);
-            // Three exchanges per party per execution.
-            assert_eq!(
-                report.exchanges,
-                3 * t as u64 * (report.rejections as u64 + 1)
-            );
+            // Per execution: reveal, respond, and the next execution's commitment, per party. The
+            // very first execution also fetches its own commitments.
+            let executions = report.rejections as u64 + 1;
+            let first = if tag == "a" { t as u64 } else { 0 };
+            assert_eq!(report.exchanges, 3 * t as u64 * executions + first);
         }
     }
 }
@@ -143,67 +143,35 @@ async fn a_party_answers_a_session_once() {
         async move { call(&addr, &link, &frame).await.unwrap().reply.body }
     };
     let mut commitments = Vec::new();
+    let mut ids = std::collections::BTreeMap::new();
     for p in [1u8, 2] {
-        let Body::M1Commit { commitment } = ask(
-            p,
-            Body::M1 {
-                message: message("once"),
-            },
-        )
-        .await
-        else {
+        let Body::PresignCommit { id, commitment } = ask(p, Body::Presign).await else {
             panic!()
         };
         commitments.push((p - 1, commitment));
+        ids.insert(p, id);
     }
+    let m2 = |p: u8| Body::M2 {
+        message: message("once"),
+        presign: ids[&p],
+        commitments: commitments.clone(),
+    };
     let mut revealed = Vec::new();
     for p in [1u8, 2] {
-        let Body::M2Reveal { w } = ask(
-            p,
-            Body::M2 {
-                commitments: commitments.clone(),
-            },
-        )
-        .await
-        else {
+        let Body::M2Reveal { w } = ask(p, m2(p)).await else {
             panic!()
         };
         revealed.push((p - 1, w));
     }
-    // A second reveal request for the same session is refused and burns the session.
-    assert!(matches!(
-        ask(
-            2,
-            Body::M2 {
-                commitments: commitments.clone()
-            }
-        )
-        .await,
-        Body::Refused { .. }
-    ));
-    assert!(matches!(
-        ask(
-            1,
-            Body::M3 {
-                revealed: revealed.clone()
-            }
-        )
-        .await,
-        Body::M3Response { .. }
-    ));
-    // The masks are gone: the same challenge, or any other, gets nothing.
-    assert!(matches!(
-        ask(
-            1,
-            Body::M3 {
-                revealed: revealed.clone()
-            }
-        )
-        .await,
-        Body::Refused { .. }
-    ));
-    assert!(matches!(
-        ask(2, Body::M3 { revealed }).await,
-        Body::Refused { .. }
-    ));
+    // The masks left the pool at the first reveal: a second reveal request gets nothing.
+    assert!(matches!(ask(2, m2(2)).await, Body::Refused { .. }));
+    let m3 = || Body::M3 {
+        revealed: revealed.clone(),
+    };
+    // Each party answers its session once...
+    assert!(matches!(ask(1, m3()).await, Body::M3Response { .. }));
+    assert!(matches!(ask(2, m3()).await, Body::M3Response { .. }));
+    // ...and then the masks are erased: the same challenge, or any other, gets nothing.
+    assert!(matches!(ask(1, m3()).await, Body::Refused { .. }));
+    assert!(matches!(ask(2, m3()).await, Body::Refused { .. }));
 }

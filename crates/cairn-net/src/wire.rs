@@ -129,12 +129,13 @@ pub enum Body {
     Finish,
     /// Drop the session and erase its state.
     Abort,
-    /// Three-round protocol, round 1: announce the message, ask for a mask commitment.
-    M1 {
-        message: Vec<u8>,
-    },
-    /// Round 2: here are everyone's commitments; reveal your `w` values.
+    /// Three-round protocol, round 1, ahead of any request: sample masks and commit to them.
+    Presign,
+    /// Round 2: sign `message` with the masks committed as `presign`; here are everyone's
+    /// commitments; reveal your `w` values.
     M2 {
+        message: Vec<u8>,
+        presign: [u8; 32],
         commitments: Vec<(u8, [u8; 32])>,
     },
     /// Round 3: here are the other parties' `w` values (packed, 23 bits per coefficient; the
@@ -147,7 +148,8 @@ pub enum Body {
     Ready {
         binding: [u8; 32],
     },
-    M1Commit {
+    PresignCommit {
+        id: [u8; 32],
         commitment: [u8; 32],
     },
     M2Reveal {
@@ -198,10 +200,10 @@ impl Body {
             Body::Mask { .. } => "Mask",
             Body::Finish => "Finish",
             Body::Abort => "Abort",
-            Body::M1 { .. } => "M1",
+            Body::Presign => "Presign",
             Body::M2 { .. } => "M2",
             Body::M3 { .. } => "M3",
-            Body::M1Commit { .. } => "M1Commit",
+            Body::PresignCommit { .. } => "PresignCommit",
             Body::M2Reveal { .. } => "M2Reveal",
             Body::M3Response { .. } => "M3Response",
             Body::Ready { .. } => "Ready",

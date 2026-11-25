@@ -384,3 +384,9 @@ and removes a way for the coordinator to feed a party a different value for its 
 `cpx42` in Helsinki for about 40 minutes (one billed hour), deleted afterwards with its SSH
 key. Results are in docs/PRODUCTION_PATH.md. The main finding is that the injected-delay
 benchmark understates WAN cost for this protocol because it does not model data transfer.
+
+**D-76. Round 1 runs ahead of time; rounds 2 and 3 do not.** Masks are sampled and committed
+before any request and bound to a message at round 2. The paper notes round 1 is independent
+of the message and signing set. Revealing openings before the message is fixed would save
+another round trip but is outside the paper's argument, so it is not done. A party keeps at
+most 16 unused mask sets and drops the oldest.

@@ -72,12 +72,14 @@ Apple M3, each party its own process, injected round-trip time on every link:
 
 | RTT | committee | latency ms (mean / p50 / p95 / max) | executions (mean) | kB per party per cert |
 |---|---|---|---|---|
-| localhost | 2-of-3 | 35 / 34 / 68 / 151 | 2.06 | 108 |
-| localhost | 3-of-4 | 92 / 97 / 245 / 346 | 1.86 | 549 |
-| localhost | 3-of-5 | 276 / 275 / 553 / 1,102 | 1.99 | 1,776 |
-| 50 ms | 2-of-3 | 376 / 208 / 935 / 1,248 | 2.01 | 106 |
-| 50 ms | 3-of-4 | 479 / 238 / 1,161 / 1,885 | 2.04 | 602 |
-| 50 ms | 3-of-5 | 613 / 320 / 1,568 / 2,822 | 1.95 | 1,740 |
+| localhost | 2-of-3 | 28 / 16 / 73 / 182 | 1.85 | 97 |
+| localhost | 3-of-4 | 98 / 94 / 189 / 330 | 2.08 | 615 |
+| localhost | 3-of-5 | 249 / 137 / 556 / 1,214 | 1.83 | 1,634 |
+| 50 ms | 2-of-3 | 265 / 138 / 674 / 1,204 | 1.99 | 105 |
+| 50 ms | 3-of-4 | 350 / 330 / 828 / 1,493 | 2.10 | 619 |
+| 50 ms | 3-of-5 | 532 / 495 / 1,233 / 2,245 | 2.12 | 1,892 |
+
+Masks are sampled ahead of time, so a signing request costs two round trips per execution.
 
 **Across two real hosts** (one party and the coordinator on a home connection in the US, the
 others in Helsinki, 185 ms apart) it is slower than the injected-delay rows suggest, because
@@ -90,7 +92,8 @@ this protocol moves a lot of data and injected delay does not model that:
 | 3-of-5 | 20 | 6.30 / 6.24 / 11.66 | 1,872 |
 
 A stock pqc-sidecar signed a live checkpoint through the cross-host 3-of-4 committee in about
-3 s. For comparison, the tower design took 21 s on a similar link with real MPC. These numbers
+3 s. That run predates the precomputed masks, which save one round trip per execution but not
+the data transfer that dominated it. For comparison, the tower design took 21 s on a similar link with real MPC. These numbers
 include all of the cryptography; there is nothing left to substitute.
 
 ```bash

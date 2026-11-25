@@ -220,3 +220,35 @@ keep connections warm between rounds. None is done.
 
 Limits of this run: one run, 20 to 50 certificates per row, one home uplink, an SSH tunnel
 under the TLS links, shared vCPUs, a chain stand-in.
+
+## Update: masks sampled ahead of time
+
+Round 1 no longer waits for a request. A party samples its masks and commits to them when
+asked (`Presign`), independently of the message and of who signs; the coordinator fetches the
+next execution's commitments while the current execution is in round 3, and once at startup.
+A signing request therefore starts at round 2, where the party binds the precomputed masks to
+the message and the session and removes them from its pool. Only round 1 moved: the paper
+allows that, and revealing the openings before the message is fixed is not covered by its
+argument.
+
+Same local benchmark as before, each party its own process, 100 certificates per row:
+
+| RTT | committee | before, mean ms | now, mean / p50 / p95 ms | executions (mean) |
+|---|---|---|---|---|
+| localhost | 2-of-3 | 35 | 28 / 16 / 73 | 1.85 |
+| localhost | 3-of-4 | 92 | 98 / 94 / 189 | 2.08 |
+| localhost | 3-of-5 | 276 | 249 / 137 / 556 | 1.83 |
+| 50 ms | 2-of-3 | 376 | 265 / 138 / 674 | 1.99 |
+| 50 ms | 3-of-4 | 479 | 350 / 330 / 828 | 2.10 |
+| 50 ms | 3-of-5 | 613 | 532 / 495 / 1,233 | 2.12 |
+
+About a quarter faster where round trips dominate, as expected from three round trips becoming
+two. It has **not** been re-measured across real hosts. There, moving the openings dominated
+(rounds 2 and 3), and this change does not reduce that, so the gain on such a link should be
+smaller: roughly one round trip per execution.
+
+What would reduce the data itself is still open: the openings are uniform field elements and
+do not compress, and each party must see every other party's openings to check commitments.
+The remaining levers are placement (a coordinator near the parties, direct connections instead
+of one tunnel) and fewer repetitions per execution, which is a parameter question for the
+paper's analysis, not an engineering one.

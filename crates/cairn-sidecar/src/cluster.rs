@@ -425,9 +425,12 @@ impl CommitteeSigner {
             .worker_threads(2)
             .enable_all()
             .build()?;
+        let mut coordinator = cairn_net::FlatCoordinator::new(key, peers, policy, tls);
+        // Fetch the first mask commitments now, so the first request starts at round 2.
+        runtime.block_on(coordinator.warm());
         Ok(Self {
             runtime,
-            coordinator: cairn_net::FlatCoordinator::new(key, peers, policy, tls),
+            coordinator,
         })
     }
 

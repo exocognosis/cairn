@@ -4,8 +4,10 @@
 //! no MPC backend and no root engine. The coordinator relays the three rounds; everything it
 //! carries is public. One protocol execution:
 //!
-//! 1. `M1`: each active party samples its masks and returns a commitment.
-//! 2. `M2`: each party receives all commitments and reveals its `w` values.
+//! 1. `Presign`: each party samples its masks and returns a commitment. This does not depend
+//!    on the message or on who signs, so it runs ahead of time: the coordinator fetches the
+//!    next execution's commitments while the current one is in round 3.
+//! 2. `M2`: each party receives the message and all commitments and reveals its `w` values.
 //! 3. `M3`: each party receives all `w` values, checks them against the commitments it was
 //!    given in round 2, and answers wherever its own rejection test passes.
 //!
@@ -34,10 +36,15 @@ use tokio::task::JoinHandle;
 
 struct PartySession {
     message: Vec<u8>,
-    round1: Option<Round1>,
-    own_commitment: [u8; 32],
-    commitments: Option<BTreeMap<u8, [u8; 32]>>,
+    round1: Round1,
+    commitments: BTreeMap<u8, [u8; 32]>,
 }
+
+/// Masks sampled ahead of time: id, state, commitment.
+type Presigned = ([u8; 32], Round1, [u8; 32]);
+
+/// How many unused precomputed mask sets a party keeps; the oldest are dropped beyond this.
+const MAX_PRESIGNS: usize = 16;
 
 /// One member of a flat committee.
 pub struct PartyNode {
@@ -46,6 +53,7 @@ pub struct PartyNode {
     pub share: PartyKey,
     pub fault: FaultMode,
     sessions: Mutex<HashMap<[u8; 32], PartySession>>,
+    presigns: Mutex<std::collections::VecDeque<Presigned>>,
 }
 
 const MAX_SESSIONS: usize = 64;
@@ -64,59 +72,73 @@ impl PartyNode {
             share,
             fault,
             sessions: Mutex::new(HashMap::new()),
+            presigns: Mutex::default(),
         }
     }
 
     fn respond(&self, session: [u8; 32], body: Body) -> Body {
         let mut sessions = self.sessions.lock().expect("party sessions");
         match body {
-            Body::M1 { message } => {
+            Body::Presign => {
+                // Round 1, offline: independent of the message and of who will sign.
+                let (round1, commitment) = self.share.round1(&self.key, &mut OsRng);
+                let id: [u8; 32] = rand::random();
+                let mut presigns = self.presigns.lock().expect("presigns");
+                if presigns.len() >= MAX_PRESIGNS {
+                    presigns.pop_front();
+                }
+                presigns.push_back((id, round1, commitment));
+                Body::PresignCommit { id, commitment }
+            }
+            Body::M2 {
+                message,
+                presign,
+                commitments,
+            } => {
                 if !message.starts_with(CHECKPOINT_DOMAIN) {
                     return refused("not a checkpoint message");
                 }
-                if sessions.len() >= MAX_SESSIONS {
-                    sessions.clear();
-                }
-                let (round1, commitment) = self.share.round1(&self.key, &mut OsRng);
-                let state = PartySession {
-                    message,
-                    round1: Some(round1),
-                    own_commitment: commitment,
-                    commitments: None,
+                // Take the masks out of the pool: they can serve this one session only.
+                let taken = {
+                    let mut presigns = self.presigns.lock().expect("presigns");
+                    presigns
+                        .iter()
+                        .position(|(id, _, _)| *id == presign)
+                        .and_then(|pos| presigns.remove(pos))
                 };
-                sessions.insert(session, state);
-                Body::M1Commit { commitment }
-            }
-            Body::M2 { commitments } => {
-                let Some(state) = sessions.get_mut(&session) else {
-                    return refused("unknown session");
+                let Some((_, round1, own)) = taken else {
+                    return refused("unknown or used presign");
                 };
                 let map: BTreeMap<u8, [u8; 32]> = commitments.into_iter().collect();
-                // Reveal only once, and only if our own commitment is among those relayed.
-                if state.commitments.is_some()
-                    || map.get(&self.share.index) != Some(&state.own_commitment)
-                {
+                if sessions.contains_key(&session) || map.get(&self.share.index) != Some(&own) {
                     sessions.remove(&session);
                     return refused(
                         "commitment set is not consistent with this party's commitment",
                     );
                 }
-                let Some(round1) = &state.round1 else {
-                    return refused("no masks for this session");
-                };
+                if sessions.len() >= MAX_SESSIONS {
+                    sessions.clear();
+                }
                 let w = round1.reveal().iter().map(mithril::w_to_wire).collect();
-                state.commitments = Some(map);
+                sessions.insert(
+                    session,
+                    PartySession {
+                        message,
+                        round1,
+                        commitments: map,
+                    },
+                );
                 Body::M2Reveal { w }
             }
             Body::M3 { revealed } => {
                 // Whatever happens, this session's masks are used up now.
-                let Some(mut state) = sessions.remove(&session) else {
-                    return refused("unknown session");
-                };
-                let (Some(round1), Some(commitments)) =
-                    (state.round1.take(), state.commitments.take())
+                let Some(PartySession {
+                    message,
+                    round1,
+                    commitments,
+                }) = sessions.remove(&session)
                 else {
-                    return refused("rounds out of order");
+                    return refused("unknown session");
                 };
                 // Our own openings come from our own state, never from the coordinator.
                 let mut map: BTreeMap<u8, Vec<PolyVec>> = BTreeMap::new();
@@ -141,7 +163,7 @@ impl PartyNode {
                 }
                 match self
                     .share
-                    .round3(&self.key, round1, &state.message, &commitments, &map)
+                    .round3(&self.key, round1, &message, &commitments, &map)
                 {
                     Some(mut z) => {
                         if self.fault == FaultMode::BadResponse {
@@ -189,6 +211,9 @@ impl Handler for PartyNode {
     }
 }
 
+/// Per party: (presign id, commitment) pairs fetched ahead of time.
+type CommitmentPool = BTreeMap<u8, std::collections::VecDeque<([u8; 32], [u8; 32])>>;
+
 /// Drives signatures across a flat committee.
 pub struct FlatCoordinator {
     key: Arc<GroupKey>,
@@ -198,6 +223,8 @@ pub struct FlatCoordinator {
     pub policy: NetPolicy,
     excluded: BTreeSet<NodeId>,
     signed: u64,
+    /// Commitments fetched ahead of time, per party: (presign id, commitment).
+    presigns: Mutex<CommitmentPool>,
 }
 
 fn fault(culprit: NodeId, kind: NetFaultKind) -> NetFault {
@@ -217,6 +244,7 @@ impl FlatCoordinator {
             policy,
             excluded: BTreeSet::new(),
             signed: 0,
+            presigns: Mutex::default(),
         }
     }
 
@@ -316,6 +344,44 @@ impl FlatCoordinator {
         }
     }
 
+    /// Round 1 for `parties`: ask each for a fresh mask commitment and remember it.
+    async fn fetch_presigns(
+        &self,
+        report: &Mutex<&mut NetReport>,
+        parties: &[u8],
+    ) -> Result<(), Vec<NetFault>> {
+        let got = self
+            .round(report, parties, rand::random(), &Body::Presign, |b| {
+                if let Body::PresignCommit { id, commitment } = b {
+                    Some((id, commitment))
+                } else {
+                    None
+                }
+            })
+            .await?;
+        let mut pool = self.presigns.lock().expect("presigns");
+        for (party, presign) in got {
+            pool.entry(party).or_default().push_back(presign);
+        }
+        Ok(())
+    }
+
+    /// Fetch mask commitments for the parties that would sign next, so that the next request
+    /// starts at round 2. Failures are left for the signing path to report.
+    pub async fn warm(&mut self) {
+        let params = self.key.params;
+        let active: Vec<u8> = (0..params.n as u8)
+            .filter(|i| {
+                self.peers.contains_key(&NodeId::Party(i + 1))
+                    && !self.excluded.contains(&NodeId::Party(i + 1))
+            })
+            .take(params.t)
+            .collect();
+        let mut scratch = NetReport::default();
+        let guard = Mutex::new(&mut scratch);
+        let _ = self.fetch_presigns(&guard, &active).await;
+    }
+
     /// One protocol execution. `Ok(None)` means it completed but no repetition yielded a
     /// signature (the expected outcome about half the time).
     async fn execute(
@@ -325,33 +391,55 @@ impl FlatCoordinator {
         message: &[u8],
     ) -> Result<Option<[u8; SIGNATURE_BYTES]>, Vec<NetFault>> {
         let session: [u8; 32] = rand::random();
-        let m1 = Body::M1 {
-            message: message.to_vec(),
+        // Round 1 normally happened ahead of time; fetch for anyone we have nothing from.
+        let missing: Vec<u8> = {
+            let pool = self.presigns.lock().expect("presigns");
+            active
+                .iter()
+                .copied()
+                .filter(|i| !pool.get(i).is_some_and(|q| !q.is_empty()))
+                .collect()
         };
-        let commitments = self
-            .round(report, active, session, &m1, |b| {
-                if let Body::M1Commit { commitment } = b {
-                    Some(commitment)
-                } else {
-                    None
-                }
-            })
-            .await?;
-        let m2 = Body::M2 {
-            commitments: commitments.iter().map(|(i, c)| (*i, *c)).collect(),
+        if !missing.is_empty() {
+            self.fetch_presigns(report, &missing).await?;
+        }
+        let mine: BTreeMap<u8, ([u8; 32], [u8; 32])> = {
+            let mut pool = self.presigns.lock().expect("presigns");
+            active
+                .iter()
+                .filter_map(|i| Some((*i, pool.get_mut(i)?.pop_front()?)))
+                .collect()
         };
+        if mine.len() != active.len() {
+            return Err(vec![NetFault {
+                culprit: None,
+                kind: NetFaultKind::Unattributed("missing presign".into()),
+            }]);
+        }
+        let commitments: Vec<(u8, [u8; 32])> = mine.iter().map(|(i, (_, c))| (*i, *c)).collect();
         let wire_w = self
-            .round(report, active, session, &m2, |b| {
-                if let Body::M2Reveal { w } = b {
-                    Some(w)
-                } else {
-                    None
-                }
-            })
-            .await?;
-        // Each party gets the others' openings; it already holds its own.
-        let wire_z = self
             .round_with(
+                report,
+                active,
+                session,
+                |to| Body::M2 {
+                    message: message.to_vec(),
+                    presign: mine[&to].0,
+                    commitments: commitments.clone(),
+                },
+                |b| {
+                    if let Body::M2Reveal { w } = b {
+                        Some(w)
+                    } else {
+                        None
+                    }
+                },
+            )
+            .await?;
+        // Round 3, and in parallel round 1 of the next execution. Each party gets the others'
+        // openings; it already holds its own.
+        let (wire_z, _prefetched) = futures_util::future::join(
+            self.round_with(
                 report,
                 active,
                 session,
@@ -369,8 +457,11 @@ impl FlatCoordinator {
                         None
                     }
                 },
-            )
-            .await?;
+            ),
+            self.fetch_presigns(report, active),
+        )
+        .await;
+        let wire_z = wire_z?;
 
         let malformed = |i: &u8| {
             vec![fault(

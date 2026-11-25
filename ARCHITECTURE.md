@@ -367,16 +367,22 @@ between them; any `T - 1` miss at least one. The public key is a standard ML-DSA
 **One execution**, for an active set of exactly `T` parties, with `K` parallel repetitions:
 
 ```
-coordinator                                   parties (T active)
-   | -- M1{message} --------------------------> |  sample K masks in a hyperball,
-   | <------------ M1Commit{H(w_1..w_K)} ------ |  w = A r1 + r2
-   | -- M2{all commitments} ------------------> |  check own commitment is in the set
-   | <------------ M2Reveal{w_1..w_K} --------- |
-   | -- M3{all w} ----------------------------> |  check every w against its commitment;
+coordinator                                   parties
+   | -- Presign ------------------------------> |  ahead of time, for any message:
+   | <------------ PresignCommit{id, H(w..)} -- |  sample K masks in a hyperball, w = A r1 + r2
+   |
+   | -- M2{message, presign id, commitments} -> |  take those masks out of the pool, bind them to
+   | <------------ M2Reveal{w_1..w_K} --------- |  this session; check own commitment is in the set
+   | -- M3{the others' w} --------------------> |  check every w against its commitment;
    | <------------ M3Response{z1 or none, xK} - |  per repetition: c from the summed w,
    |                                            |  z = c s_part + r, answer if ||z|| <= r
    | combine: first repetition all answered; hint from public values; verify
 ```
+
+Round 1 (`Presign`) is independent of the message and of who signs. The coordinator fetches the
+next execution's commitments during round 3 of the current one and once at startup, so a
+request costs two round trips per execution. Openings are never revealed before the message
+is fixed.
 
 The signature is `(c~, sum of z1, hint)` in the standard encoding. An execution yields one
 about half the time; the coordinator then starts a new execution with a fresh session.
@@ -384,7 +390,7 @@ about half the time; the coordinator then starts a new execution with a fresh se
 **What the coordinator sees** is public: commitments, `w` values, and responses that passed
 each party's own rejection test. It holds no share. It can make an execution fail by relaying
 inconsistently; it cannot obtain a second answer under the same mask, because a party erases a
-session's masks when it answers round 3 and refuses a repeated round 2.
+session's masks when it answers round 3, and precomputed masks leave the pool at round 2.
 
 **Faults.** A silent or refusing party is excluded and another takes its place while more than
 `T` remain. A wrong response is detected (the summed response fails the signing equation) but
