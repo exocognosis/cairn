@@ -780,6 +780,10 @@ pub fn sign_local<R: Rng + CryptoRng>(
 }
 
 #[cfg(test)]
+#[path = "mithril_interop.rs"]
+mod interop;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rand::rngs::OsRng;

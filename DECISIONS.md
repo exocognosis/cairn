@@ -460,3 +460,10 @@ against `mithril.rs`: parameters, sampler, rounding, rejection test, sharing tab
 and combine agree. The one difference (a hint-error norm exactly equal to gamma2) was aligned
 to the reference. The reference was read, not executed or linked; the sharing tables are
 restated as a test. Float sampling is kept because the reference does the same.
+
+**D-92. Interop with the reference as an opt-in test.** `scripts/reference-interop.sh` clones
+the reference at a pinned commit into `target/`, adds one test file
+(`interop/reference/cairn_interop_test.go`) that exposes its own functions step by step, and
+runs mixed Go/Rust committees. It is ignored by default and not in CI, because it needs Go
+and a network fetch. The reference hashes `tr || msg`, so it is given `0 || 0 || msg` to
+match FIPS 204's empty-context encoding. D-91's "read, not executed" no longer holds.
