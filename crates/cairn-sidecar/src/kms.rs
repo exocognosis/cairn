@@ -159,6 +159,14 @@ impl Metrics {
 /// Serve `/metrics` (Prometheus text) and `/healthz` on `listen`. Plain HTTP with no
 /// authentication: bind it to loopback or a private interface.
 pub fn serve_metrics(listen: &str, metrics: Arc<Metrics>) -> std::io::Result<SocketAddr> {
+    serve_text_metrics(listen, move || metrics.render())
+}
+
+/// Serve `/metrics` (whatever `render` returns) and `/healthz` on `listen`.
+pub fn serve_text_metrics(
+    listen: &str,
+    render: impl Fn() -> String + Send + 'static,
+) -> std::io::Result<SocketAddr> {
     let server = Server::http(listen).map_err(std::io::Error::other)?;
     let addr = server
         .server_addr()
@@ -167,7 +175,7 @@ pub fn serve_metrics(listen: &str, metrics: Arc<Metrics>) -> std::io::Result<Soc
     std::thread::spawn(move || {
         for request in server.incoming_requests() {
             let response = match request.url() {
-                "/metrics" => Response::from_string(metrics.render()),
+                "/metrics" => Response::from_string(render()),
                 "/healthz" => Response::from_string("ok\n"),
                 _ => Response::from_string("not found\n").with_status_code(404),
             };

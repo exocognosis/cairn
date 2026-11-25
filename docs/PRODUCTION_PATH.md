@@ -265,7 +265,8 @@ persisted protection against conflicting or older checkpoints; audit logs.
 `cairn dkg` implements the paper's distributed key generation for the committee path, relayed
 through the coordinator with end-to-end encrypted seeds. A committee of separate processes
 generates its key and signs with it in the tests, and `scripts/run_local_committee.sh` uses it
-by default. Remaining trust in setup: exchanging identity public keys, and the TLS authority.
+by default. Remaining trust in setup: exchanging identity public keys, and the TLS authority (since
+removed: node certificates are self-made and pinned by fingerprint).
 
 ## Update: attribution, arithmetic, mask lifetimes, and a real chain
 

@@ -1,0 +1,77 @@
+# Prometheus alert rules for a cairn committee.
+#
+# Scrape every party's `--metrics-listen` address and the coordinator's (`cairn serve-kms
+# --metrics-listen`). Thresholds assume a checkpoint every few minutes; adjust the windows to
+# the chain's checkpoint interval. Nothing here pages on a single slow signature.
+groups:
+  - name: cairn-coordinator
+    rules:
+      - alert: CairnEndpointDown
+        expr: up{job="cairn-kms"} == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "The signing endpoint {{ $labels.instance }} is not answering."
+          action: "Point the sidecar at the standby coordinator (docs/OPERATIONS.md, Standby coordinator)."
+      - alert: CairnSigningFailing
+        expr: increase(cairn_kms_sign_failures_total[15m]) > 2
+        labels: { severity: page }
+        annotations:
+          summary: "Signatures are failing on {{ $labels.instance }}."
+          action: "Read the coordinator's log: it names the party that timed out or answered wrongly."
+      - alert: CairnNoSignatureLately
+        expr: time() - cairn_kms_last_signature_timestamp_seconds > 3600 and cairn_kms_last_signature_timestamp_seconds > 0
+        labels: { severity: warn }
+        annotations:
+          summary: "No signature from {{ $labels.instance }} for an hour."
+      - alert: CairnUnauthenticatedRequests
+        expr: increase(cairn_kms_rejected_auth_total[15m]) > 5
+        labels: { severity: warn }
+        annotations:
+          summary: "Requests with bad credentials are reaching {{ $labels.instance }}."
+      - alert: CairnSlowSignatures
+        expr: rate(cairn_kms_sign_seconds_total[30m]) / rate(cairn_kms_signatures_total[30m]) > 5
+        for: 30m
+        labels: { severity: warn }
+        annotations:
+          summary: "Signatures average over 5 s on {{ $labels.instance }}."
+
+  - name: cairn-party
+    rules:
+      - alert: CairnPartyDown
+        expr: up{job="cairn-party"} == 0
+        for: 5m
+        labels: { severity: warn }
+        annotations:
+          summary: "Party {{ $labels.instance }} is down. The committee signs while a threshold of parties is up."
+      - alert: CairnTooFewParties
+        # Set the number to the committee's threshold T.
+        expr: count(up{job="cairn-party"} == 1) < 3
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "Fewer parties are up than the threshold; nothing can be signed."
+      - alert: CairnPartyRestarted
+        expr: cairn_party_uptime_seconds < 300
+        labels: { severity: info }
+        annotations:
+          summary: "Party {{ $labels.instance }} restarted."
+          action: "Confirm it was a restart of the same machine, not a clone or a restored snapshot (docs/OPERATIONS.md, Never clone a party)."
+      - alert: CairnPolicyRefusals
+        expr: increase(cairn_party_policy_refused_total[15m]) > 0
+        labels: { severity: page }
+        annotations:
+          summary: "Party {{ $labels.instance }} refused a message under its signing policy."
+          action: "Something asked the committee to sign what a party will not: a wrong key, an unlisted chain, a lower height or a second checkpoint at a height. Read that party's audit log before anything else."
+      - alert: CairnProtocolRefusals
+        expr: increase(cairn_party_refused_total[15m]) > 3
+        labels: { severity: warn }
+        annotations:
+          summary: "Party {{ $labels.instance }} is refusing malformed or inconsistent requests."
+      - alert: CairnPartyNotResponding
+        # Up, others are signing, this one is never chosen or never answers.
+        expr: increase(cairn_party_responses_total[6h]) == 0 and on() increase(cairn_kms_signatures_total[6h]) > 10
+        labels: { severity: warn }
+        annotations:
+          summary: "Party {{ $labels.instance }} released no response in 6 h while the committee signed."
+          action: "The coordinator may have excluded it after a fault; check the coordinator's log."

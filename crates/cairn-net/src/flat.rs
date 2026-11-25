@@ -28,6 +28,7 @@ use futures_util::future::join_all;
 use rand::rngs::OsRng;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use threshold_mldsa::fips204::{PolyVec, SIGNATURE_BYTES};
@@ -63,6 +64,106 @@ pub struct PartyNode {
     policy: Mutex<Policy>,
     /// Unused masks and half-finished sessions older than this are erased.
     pub mask_ttl: Duration,
+    pub stats: Arc<PartyStats>,
+}
+
+/// What a party has done since it started, for its operator's monitoring. Counts only:
+/// nothing here depends on a share or a mask.
+pub struct PartyStats {
+    started: Instant,
+    presigns: AtomicU64,
+    sessions: AtomicU64,
+    responses: AtomicU64,
+    policy_refused: AtomicU64,
+    refused: AtomicU64,
+    last_response: AtomicU64,
+}
+
+impl Default for PartyStats {
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+            presigns: AtomicU64::new(0),
+            sessions: AtomicU64::new(0),
+            responses: AtomicU64::new(0),
+            policy_refused: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+            last_response: AtomicU64::new(0),
+        }
+    }
+}
+
+impl PartyStats {
+    fn record(&self, reply: &Body) {
+        let counter = match reply {
+            Body::PresignCommit { .. } => &self.presigns,
+            Body::M2Reveal { .. } => &self.sessions,
+            Body::M3Response { .. } => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                self.last_response.store(now, Ordering::Relaxed);
+                &self.responses
+            }
+            Body::PolicyRefused { .. } => &self.policy_refused,
+            Body::Refused { .. } => &self.refused,
+            _ => return,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Prometheus text format.
+    pub fn render(&self) -> String {
+        let rows: [(&str, &str, &str, u64); 7] = [
+            (
+                "cairn_party_presigns_total",
+                "counter",
+                "Masks sampled ahead of time.",
+                self.presigns.load(Ordering::Relaxed),
+            ),
+            (
+                "cairn_party_sessions_total",
+                "counter",
+                "Signing sessions this party's policy authorised and joined.",
+                self.sessions.load(Ordering::Relaxed),
+            ),
+            (
+                "cairn_party_responses_total",
+                "counter",
+                "Signature responses released.",
+                self.responses.load(Ordering::Relaxed),
+            ),
+            (
+                "cairn_party_policy_refused_total",
+                "counter",
+                "Messages this party's signing policy refused.",
+                self.policy_refused.load(Ordering::Relaxed),
+            ),
+            (
+                "cairn_party_refused_total",
+                "counter",
+                "Requests refused as malformed, inconsistent or out of order.",
+                self.refused.load(Ordering::Relaxed),
+            ),
+            (
+                "cairn_party_last_response_timestamp_seconds",
+                "gauge",
+                "Unix time of the last response released; 0 if none.",
+                self.last_response.load(Ordering::Relaxed),
+            ),
+            (
+                "cairn_party_uptime_seconds",
+                "gauge",
+                "Seconds since this party started.",
+                self.started.elapsed().as_secs(),
+            ),
+        ];
+        rows.iter()
+            .map(|(name, kind, help, value)| {
+                format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}\n")
+            })
+            .collect()
+    }
 }
 
 const MAX_SESSIONS: usize = 64;
@@ -90,6 +191,7 @@ impl PartyNode {
             presigns: Mutex::default(),
             policy: Mutex::new(policy),
             mask_ttl: MASK_TTL,
+            stats: Arc::default(),
         }
     }
 
@@ -231,6 +333,7 @@ impl Handler for PartyNode {
             } else {
                 self.respond(request.session, request.body)
             };
+            self.stats.record(&body);
             Some(Frame {
                 version: NET_VERSION,
                 from: self.id,

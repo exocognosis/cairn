@@ -626,28 +626,84 @@ fn processes_generate_a_key_together_and_sign_with_it() {
     );
     let tls_id =
         std::sync::Arc::new(cairn_net::TlsIdentity::load(&tls, NodeId::Coordinator).unwrap());
-    let mut signer = CommitteeSigner::new(
-        key,
-        peers,
-        Policy {
-            round_timeout: Duration::from_secs(5),
-            ..Policy::default()
-        },
-        tls_id,
-    )
-    .unwrap();
-    let message = cairn_net::policy::Checkpoint {
-        chain: "cosmos:cairn-test-1".into(),
-        epoch: 1,
-        height: 100,
-        block_hash: vec![1; 32],
-        finality_commitment: vec![2; 32],
-        key_id: cairn_net::policy::key_id(&pk),
-    }
-    .message();
+    let policy = || Policy {
+        round_timeout: Duration::from_secs(5),
+        ..Policy::default()
+    };
+    let mut signer = CommitteeSigner::new(key.clone(), peers.clone(), policy(), tls_id).unwrap();
+    let checkpoint = |height: u64| {
+        cairn_net::policy::Checkpoint {
+            chain: "cosmos:cairn-test-1".into(),
+            epoch: 1,
+            height,
+            block_hash: vec![1; 32],
+            finality_commitment: vec![2; 32],
+            key_id: cairn_net::policy::key_id(&pk),
+        }
+        .message()
+    };
+    let message = checkpoint(100);
     let (signature, _) = signer.sign_with_report(&message).unwrap();
     assert!(
         off_the_shelf_verify(&pk, &message, &signature),
         "RustCrypto ml-dsa accepts a signature under the generated key"
     );
+
+    // A standby coordinator on "another machine": its own certificate, made there, pinned by
+    // the running parties as a second certificate of the coordinator. Nothing is restarted.
+    let standby_tls = work.join("standby-tls");
+    std::fs::create_dir_all(&standby_tls).unwrap();
+    std::fs::copy(
+        tls.join("fingerprints.json"),
+        standby_tls.join("fingerprints.json"),
+    )
+    .unwrap();
+    let rotated = run(&[
+        "tls-rotate",
+        "--tls",
+        standby_tls.to_str().unwrap(),
+        "--id",
+        "coordinator",
+    ]);
+    let rotated: serde_json::Value = serde_json::from_str(&rotated).unwrap();
+    run(&[
+        "tls-pin",
+        "--tls",
+        tls.to_str().unwrap(),
+        "--id",
+        "coordinator",
+        "--fingerprint",
+        rotated["fingerprint"].as_str().unwrap(),
+    ]);
+    let standby_id = std::sync::Arc::new(
+        cairn_net::TlsIdentity::load(&standby_tls, NodeId::Coordinator).unwrap(),
+    );
+    let mut standby = CommitteeSigner::new(key, peers, policy(), standby_id).unwrap();
+    // Both alive: each signs its own height through the same parties.
+    for height in [101, 102, 103] {
+        let who = if height == 102 {
+            &mut signer
+        } else {
+            &mut standby
+        };
+        let message = checkpoint(height);
+        let (signature, _) = who.sign_with_report(&message).unwrap();
+        assert!(off_the_shelf_verify(&pk, &message, &signature));
+    }
+    // The parties' own rule holds across coordinators: no second checkpoint at a height.
+    let mut conflicting = cairn_net::policy::Checkpoint {
+        chain: "cosmos:cairn-test-1".into(),
+        epoch: 1,
+        height: 103,
+        block_hash: vec![9; 32],
+        finality_commitment: vec![2; 32],
+        key_id: cairn_net::policy::key_id(&pk),
+    };
+    assert!(signer.sign_with_report(&conflicting.message()).is_err());
+    // The first coordinator is gone; the standby carries on.
+    drop(signer);
+    conflicting.height = 104;
+    let message = conflicting.message();
+    let (signature, _) = standby.sign_with_report(&message).unwrap();
+    assert!(off_the_shelf_verify(&pk, &message, &signature));
 }

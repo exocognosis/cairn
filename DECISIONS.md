@@ -483,3 +483,24 @@ and the requesting process must stay alive, because the X25519 keys it decrypts 
 ephemeral and never written to disk. No refresh is offered: re-randomising short shares
 without growing them is an open design problem, and offering something weaker under that
 name would mislead operators.
+
+**D-96. Pinned certificates, no authority.** Node links now trust a certificate because its
+fingerprint is in the local table, for the node addressed (as server) or for some node (as
+client). The cluster CA is gone. It added nothing the table did not already decide, its key
+had to exist on one machine at setup, and with it destroyed no certificate could ever be
+replaced. Certificates are self-signed; `cairn tls-rotate` makes one on the machine that will
+use it. Tables written by earlier versions load unchanged.
+
+**D-97. The table is followed on disk and checked per request.** A node re-reads
+`fingerprints.json` when its modification time changes, the server checks the pin on every
+request and the caller before reusing a pooled connection. Revocation therefore needs no
+restart and no revocation list. A node may have several fingerprints, which is what makes
+rotation overlap possible and what lets a standby coordinator have its own key.
+
+**D-98. Coordinator redundancy by duplication.** The coordinator has no state the parties
+rely on, so availability is a second coordinator, not a consensus protocol between
+coordinators. Safety under two active coordinators rests on the parties' height rule, which
+is tested. Switching the sidecar between them is left to DNS or a load balancer.
+
+**D-99. Frames of another wire version are dropped.** Mixed versions fail closed instead of
+misparsing.

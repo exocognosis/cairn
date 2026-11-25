@@ -59,6 +59,7 @@ async fn a_committee_generates_its_key_without_a_dealer_and_then_signs() {
     let subsets = all_subsets(t as usize, n);
     let mut signing_peers = Peers::new();
     let mut signing_tasks = Vec::new();
+    let mut stats = Vec::new();
     let mut key = None;
     for id in &ids {
         let dir = work.join(id.to_string());
@@ -79,6 +80,7 @@ async fn a_committee_generates_its_key_without_a_dealer_and_then_signs() {
             FaultMode::None,
             Policy::ephemeral(&pk),
         );
+        stats.push(node.stats.clone());
         signing_tasks.push(tokio::spawn(run_party(
             listener,
             node,
@@ -106,6 +108,12 @@ async fn a_committee_generates_its_key_without_a_dealer_and_then_signs() {
     .message();
     let (signature, _) = coordinator.sign(&message).await.unwrap();
     assert!(fips204::verify_standard(&pk, &message, &signature));
+    // Each party's own counters saw the signature being made.
+    let responded = stats
+        .iter()
+        .filter(|s| s.render().contains("cairn_party_responses_total 1\n"))
+        .count();
+    assert!(responded >= 2, "{responded} parties counted a response");
     signing_tasks.iter().for_each(|t| t.abort());
     let _ = std::fs::remove_dir_all(&work);
 }

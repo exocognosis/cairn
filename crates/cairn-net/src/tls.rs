@@ -1,23 +1,33 @@
-//! Mutual TLS for node links.
+//! Mutual TLS for node links, trusted by pinned certificate fingerprints.
 //!
-//! `cairn keygen` creates one cluster CA and one certificate per node. A node's certificate
-//! carries its identity as a DNS name (`leaf-2-signer-3.cairn`, `root-1.cairn`,
-//! `coordinator.cairn`). On every connection:
+//! Every node holds a self-signed certificate that carries its identity as a DNS name
+//! (`leaf-2-signer-3.cairn`, `root-1.cairn`, `party-2.cairn`, `coordinator.cairn`) and a table
+//! `fingerprints.json` that says which certificate belongs to which node. There is no
+//! certificate authority: a certificate is trusted because its fingerprint is in the table and
+//! for no other reason. On every connection:
 //!
-//! * the caller verifies that the server's certificate chains to the cluster CA and is the
-//!   certificate of the node it meant to reach (standard server-name verification);
-//! * the server requires a client certificate chaining to the cluster CA and maps it to a
-//!   [`NodeId`] through a pinned fingerprint table, and the transport drops any frame whose
-//!   `from` is not that node.
+//! * the caller checks that the server's certificate is pinned for the node it meant to reach;
+//! * the server requires a client certificate pinned for some node, and the transport drops
+//!   any frame whose `from` is not that node.
 //!
-//! TLS 1.3 only, `ring` provider. The CA key is used once, at key generation, and is not kept.
+//! The table is re-read when the file changes, and the transport checks it again on every
+//! request, so removing a fingerprint cuts that certificate off without a restart
+//! (revocation) and a node may have two fingerprints while it changes certificate (rotation).
+//! `cairn keygen` writes certificates for a whole cluster; `cairn tls-rotate` lets a node make
+//! its own, so no machine need ever hold another node's TLS key.
+//!
+//! TLS 1.3 only, `ring` provider.
 
 use crate::wire::NodeId;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{ClientConfig, DigitallySignedStruct, DistinguishedName, ServerConfig};
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 use threshold_mldsa::fips204;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
@@ -45,39 +55,42 @@ fn invalid(what: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_string())
 }
 
+/// A self-signed certificate and key for one node, in PEM.
+fn self_signed(id: NodeId) -> std::io::Result<(String, String)> {
+    use rcgen::{CertificateParams, DnType, KeyPair};
+    let key = KeyPair::generate().map_err(invalid)?;
+    let mut params = CertificateParams::new(vec![dns_name(id)]).map_err(invalid)?;
+    params
+        .distinguished_name
+        .push(DnType::CommonName, id.to_string());
+    let cert = params.self_signed(&key).map_err(invalid)?;
+    Ok((cert.pem(), key.serialize_pem()))
+}
+
+fn write_key(path: &Path, key: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    std::io::Write::write_all(&mut f, key.as_bytes())
+}
+
 /// Certificates and keys for a whole cluster, in PEM.
 pub struct ClusterTls {
-    pub ca_pem: String,
     /// Per node: certificate and private key.
     pub nodes: BTreeMap<NodeId, (String, String)>,
 }
 
 impl ClusterTls {
-    /// Create a CA and one certificate per node id.
+    /// Create one self-signed certificate per node id.
     pub fn generate(ids: &[NodeId]) -> std::io::Result<Self> {
-        use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
-        let ca_key = KeyPair::generate().map_err(invalid)?;
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).map_err(invalid)?;
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
-        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
-        ca_params
-            .distinguished_name
-            .push(DnType::CommonName, "cairn cluster CA");
-        let ca = ca_params.self_signed(&ca_key).map_err(invalid)?;
-        let mut nodes = BTreeMap::new();
-        for id in ids {
-            let key = KeyPair::generate().map_err(invalid)?;
-            let mut params = CertificateParams::new(vec![dns_name(*id)]).map_err(invalid)?;
-            params
-                .distinguished_name
-                .push(DnType::CommonName, id.to_string());
-            let cert = params.signed_by(&key, &ca, &ca_key).map_err(invalid)?;
-            nodes.insert(*id, (cert.pem(), key.serialize_pem()));
-        }
-        Ok(Self {
-            ca_pem: ca.pem(),
-            nodes,
-        })
+        let nodes = ids
+            .iter()
+            .map(|id| Ok((*id, self_signed(*id)?)))
+            .collect::<std::io::Result<_>>()?;
+        Ok(Self { nodes })
     }
 
     /// Fingerprint table: which certificate is which node.
@@ -91,22 +104,15 @@ impl ClusterTls {
             .collect()
     }
 
-    /// Write `ca.pem`, `fingerprints.json`, and per node `<id>.pem` and `<id>.key` (mode 0600).
-    /// A node needs only the first two and its own pair.
+    /// Write `fingerprints.json`, and per node `<id>.pem` and `<id>.key` (mode 0600).
+    /// A node needs only the table and its own pair.
     pub fn write(&self, dir: &Path) -> std::io::Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join("ca.pem"), &self.ca_pem)?;
         let table = serde_json::to_string_pretty(&self.fingerprints()?).map_err(invalid)?;
         std::fs::write(dir.join("fingerprints.json"), table)?;
         for (id, (cert, key)) in &self.nodes {
             std::fs::write(dir.join(format!("{}.pem", file_stem(*id))), cert)?;
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(dir.join(format!("{}.key", file_stem(*id))))?;
-            std::io::Write::write_all(&mut f, key.as_bytes())?;
+            write_key(&dir.join(format!("{}.key", file_stem(*id))), key)?;
         }
         Ok(())
     }
@@ -117,7 +123,8 @@ impl ClusterTls {
             .nodes
             .get(&id)
             .ok_or_else(|| invalid(format!("no certificate for {id}")))?;
-        TlsIdentity::from_pem(id, &self.ca_pem, cert, key, &self.fingerprints()?)
+        let table = serde_json::to_string(&self.fingerprints()?).map_err(invalid)?;
+        TlsIdentity::from_pem(id, cert, key, Pins::fixed(parse_pins(&table)?))
     }
 }
 
@@ -138,26 +145,236 @@ fn first_cert(pem: &str) -> std::io::Result<CertificateDer<'static>> {
         .ok_or_else(|| invalid("no certificate in PEM"))?
 }
 
+/// One node's entry in `fingerprints.json`: one fingerprint, or several while a certificate
+/// is being replaced.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[serde(untagged)]
+enum Entry {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Entry {
+    fn list(self) -> Vec<String> {
+        match self {
+            Entry::One(fp) => vec![fp],
+            Entry::Many(fps) => fps,
+        }
+    }
+
+    fn from_list(mut fps: Vec<String>) -> Self {
+        if fps.len() == 1 {
+            Entry::One(fps.remove(0))
+        } else {
+            Entry::Many(fps)
+        }
+    }
+}
+
+type Table = HashMap<[u8; 32], NodeId>;
+
+fn parse_pins(text: &str) -> std::io::Result<Table> {
+    let entries: BTreeMap<String, Entry> = serde_json::from_str(text).map_err(invalid)?;
+    let mut table = Table::new();
+    for (name, entry) in entries {
+        let id: NodeId = name.parse().map_err(invalid)?;
+        for fp in entry.list() {
+            let fp = unhex(&fp).ok_or_else(|| invalid("bad fingerprint"))?;
+            if table.insert(fp, id).is_some_and(|other| other != id) {
+                return Err(invalid("one fingerprint pinned for two nodes"));
+            }
+        }
+    }
+    Ok(table)
+}
+
+/// The pinned fingerprints, re-read from disk when the file changes.
+struct Pins {
+    path: Option<PathBuf>,
+    state: RwLock<(Option<SystemTime>, Table)>,
+}
+
+impl std::fmt::Debug for Pins {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Pins")
+    }
+}
+
+impl Pins {
+    fn fixed(table: Table) -> Arc<Self> {
+        Arc::new(Self {
+            path: None,
+            state: RwLock::new((None, table)),
+        })
+    }
+
+    fn file(path: PathBuf) -> std::io::Result<Arc<Self>> {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        Ok(Arc::new(Self {
+            state: RwLock::new((modified, parse_pins(&text)?)),
+            path: Some(path),
+        }))
+    }
+
+    /// Pick up a changed file. A file that cannot be read or parsed (half written, say)
+    /// leaves the table as it was; the next lookup tries again.
+    fn refresh(&self) {
+        let Some(path) = &self.path else { return };
+        let Ok(modified) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+            return;
+        };
+        if self.state.read().expect("pins").0 == Some(modified) {
+            return;
+        }
+        if let Some(table) = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| parse_pins(&text).ok())
+        {
+            *self.state.write().expect("pins") = (Some(modified), table);
+        }
+    }
+
+    fn node(&self, cert: &[u8]) -> Option<NodeId> {
+        self.refresh();
+        self.state
+            .read()
+            .expect("pins")
+            .1
+            .get(&fingerprint(cert))
+            .copied()
+    }
+}
+
+/// Accepts a certificate if and only if it is pinned: as a server, for the node the caller
+/// addressed; as a client, for any node. The handshake signature is checked as usual, so the
+/// peer must hold the certificate's key.
+#[derive(Debug)]
+struct Pinned {
+    pins: Arc<Pins>,
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+fn refused(what: &str) -> rustls::Error {
+    rustls::Error::General(what.into())
+}
+
+impl Pinned {
+    fn tls13(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+}
+
+impl ServerCertVerifier for Pinned {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let node = self
+            .pins
+            .node(end_entity)
+            .ok_or_else(|| refused("server certificate is not pinned"))?;
+        match server_name {
+            ServerName::DnsName(name) if name.as_ref() == dns_name(node) => {
+                Ok(ServerCertVerified::assertion())
+            }
+            _ => Err(refused("server certificate is pinned for another node")),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(refused("TLS 1.3 only"))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.tls13(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+impl ClientCertVerifier for Pinned {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        self.pins
+            .node(end_entity)
+            .map(|_| ClientCertVerified::assertion())
+            .ok_or_else(|| refused("client certificate is not pinned"))
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(refused("TLS 1.3 only"))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.tls13(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
 /// One node's TLS configuration: how it proves who it is and how it recognises its peers.
 pub struct TlsIdentity {
     pub id: NodeId,
     connector: TlsConnector,
     acceptor: TlsAcceptor,
-    known: HashMap<[u8; 32], NodeId>,
+    pins: Arc<Pins>,
 }
 
 impl TlsIdentity {
-    pub fn from_pem(
+    fn from_pem(
         id: NodeId,
-        ca_pem: &str,
         cert_pem: &str,
         key_pem: &str,
-        fingerprints: &BTreeMap<String, String>,
+        pins: Arc<Pins>,
     ) -> std::io::Result<Self> {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let mut roots = RootCertStore::empty();
-        roots.add(first_cert(ca_pem)?).map_err(invalid)?;
-        let roots = Arc::new(roots);
+        let provider: Arc<CryptoProvider> = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = Arc::new(Pinned {
+            pins: pins.clone(),
+            algorithms: provider.signature_verification_algorithms,
+        });
         let chain = vec![first_cert(cert_pem)?];
         let key = || -> std::io::Result<PrivateKeyDer<'static>> {
             rustls_pemfile::private_key(&mut key_pem.as_bytes())?
@@ -167,50 +384,36 @@ impl TlsIdentity {
         let client = ClientConfig::builder_with_provider(provider.clone())
             .with_protocol_versions(versions)
             .map_err(invalid)?
-            .with_root_certificates(roots.clone())
+            .dangerous()
+            .with_custom_certificate_verifier(verifier.clone())
             .with_client_auth_cert(chain.clone(), key()?)
             .map_err(invalid)?;
-        let verifier =
-            rustls::server::WebPkiClientVerifier::builder_with_provider(roots, provider.clone())
-                .build()
-                .map_err(invalid)?;
         let server = ServerConfig::builder_with_provider(provider)
             .with_protocol_versions(versions)
             .map_err(invalid)?
             .with_client_cert_verifier(verifier)
             .with_single_cert(chain, key()?)
             .map_err(invalid)?;
-        let known = fingerprints
-            .iter()
-            .map(|(name, fp)| {
-                Ok((
-                    unhex(fp).ok_or_else(|| invalid("bad fingerprint"))?,
-                    name.parse().map_err(invalid)?,
-                ))
-            })
-            .collect::<std::io::Result<_>>()?;
         Ok(Self {
             id,
             connector: TlsConnector::from(Arc::new(client)),
             acceptor: TlsAcceptor::from(Arc::new(server)),
-            known,
+            pins,
         })
     }
 
-    /// Load a node's identity from a directory written by [`ClusterTls::write`].
+    /// Load a node's identity from a directory written by [`ClusterTls::write`] or
+    /// [`rotate`]. The fingerprint table is followed on disk from then on.
     pub fn load(dir: &Path, id: NodeId) -> std::io::Result<Self> {
         let read = |name: String| {
             std::fs::read_to_string(dir.join(&name))
                 .map_err(|e| std::io::Error::new(e.kind(), format!("{name}: {e}")))
         };
-        let fingerprints: BTreeMap<String, String> =
-            serde_json::from_str(&read("fingerprints.json".into())?).map_err(invalid)?;
         Self::from_pem(
             id,
-            &read("ca.pem".into())?,
             &read(format!("{}.pem", file_stem(id)))?,
             &read(format!("{}.key", file_stem(id)))?,
-            &fingerprints,
+            Pins::file(dir.join("fingerprints.json"))?,
         )
     }
 
@@ -226,10 +429,92 @@ impl TlsIdentity {
         ServerName::try_from(dns_name(to)).expect("node names are valid DNS names")
     }
 
-    /// Which node presented this certificate, if it is one of the cluster's.
+    /// Which node this certificate is pinned for right now, if any.
     pub(crate) fn peer(&self, certs: Option<&[CertificateDer<'_>]>) -> Option<NodeId> {
-        self.known.get(&fingerprint(certs?.first()?)).copied()
+        self.pins.node(certs?.first()?)
     }
+}
+
+fn read_entries(dir: &Path) -> std::io::Result<BTreeMap<String, Vec<String>>> {
+    let path = dir.join("fingerprints.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(e),
+    };
+    let entries: BTreeMap<String, Entry> = serde_json::from_str(&text).map_err(invalid)?;
+    Ok(entries.into_iter().map(|(k, v)| (k, v.list())).collect())
+}
+
+/// Replace the table in one step, so a running node never reads half a file.
+fn write_entries(dir: &Path, entries: BTreeMap<String, Vec<String>>) -> std::io::Result<()> {
+    let entries: BTreeMap<String, Entry> = entries
+        .into_iter()
+        .filter(|(_, fps)| !fps.is_empty())
+        .map(|(k, fps)| (k, Entry::from_list(fps)))
+        .collect();
+    let text = serde_json::to_string_pretty(&entries).map_err(invalid)?;
+    parse_pins(&text)?;
+    let tmp = dir.join("fingerprints.json.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(tmp, dir.join("fingerprints.json"))
+}
+
+/// Trust `fingerprint` as a certificate of `id`, in addition to any already pinned.
+pub fn pin(dir: &Path, id: NodeId, fingerprint: &str) -> std::io::Result<()> {
+    let fingerprint = fingerprint.trim().to_lowercase();
+    unhex(&fingerprint).ok_or_else(|| invalid("a fingerprint is 64 hex characters"))?;
+    let mut entries = read_entries(dir)?;
+    let fps = entries.entry(id.to_string()).or_default();
+    if !fps.contains(&fingerprint) {
+        fps.push(fingerprint);
+    }
+    write_entries(dir, entries)
+}
+
+/// Stop trusting one certificate of `id`, or all of them. Returns how many were removed.
+pub fn unpin(dir: &Path, id: NodeId, fingerprint: Option<&str>) -> std::io::Result<usize> {
+    let fingerprint = fingerprint.map(|f| f.trim().to_lowercase());
+    let mut entries = read_entries(dir)?;
+    let fps = entries.entry(id.to_string()).or_default();
+    let before = fps.len();
+    fps.retain(|fp| fingerprint.as_ref().is_some_and(|f| f != fp));
+    let removed = before - fps.len();
+    write_entries(dir, entries)?;
+    Ok(removed)
+}
+
+/// Give `id` a new key and self-signed certificate in `dir`, made on this machine, and pin it
+/// in this directory's own table in place of the old one. The previous pair is kept as
+/// `<id>.pem.old` / `<id>.key.old`. Returns the old fingerprint, if there was one, and the new.
+/// A running node keeps its old certificate until it is restarted.
+pub fn rotate(dir: &Path, id: NodeId) -> std::io::Result<(Option<String>, String)> {
+    std::fs::create_dir_all(dir)?;
+    let (cert_path, key_path) = (
+        dir.join(format!("{}.pem", file_stem(id))),
+        dir.join(format!("{}.key", file_stem(id))),
+    );
+    let old = match std::fs::read_to_string(&cert_path) {
+        Ok(pem) => Some(hex(&fingerprint(&first_cert(&pem)?))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let (cert, key) = self_signed(id)?;
+    let new = hex(&fingerprint(&first_cert(&cert)?));
+    if old.is_some() {
+        std::fs::rename(&cert_path, cert_path.with_extension("pem.old"))?;
+        if key_path.exists() {
+            std::fs::rename(&key_path, key_path.with_extension("key.old"))?;
+        }
+    }
+    write_key(&key_path, &key)?;
+    std::fs::write(&cert_path, cert)?;
+    let mut entries = read_entries(dir)?;
+    let fps = entries.entry(id.to_string()).or_default();
+    fps.retain(|fp| Some(fp) != old.as_ref());
+    fps.push(new.clone());
+    write_entries(dir, entries)?;
+    Ok((old, new))
 }
 
 /// Server-side TLS for a hop whose callers authenticate another way: the KMS endpoint, where

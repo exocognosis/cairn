@@ -141,7 +141,11 @@ pub async fn call(addr: &str, link: &Link, frame: &Frame) -> Result<Exchange, Ca
     let key = (addr.to_string(), frame.to);
     let exchange = async {
         tokio::time::sleep(link.delay).await;
-        if let Some(mut stream) = link.pool.take(&key) {
+        // An idle connection is reused only while its certificate is still pinned.
+        let idle = link.pool.take(&key).filter(|stream| {
+            link.tls.peer(stream.get_ref().1.peer_certificates()) == Some(frame.to)
+        });
+        if let Some(mut stream) = idle {
             if let Ok(done) = exchange_on(&mut stream, frame).await {
                 link.pool.put(key.clone(), stream);
                 return Ok(done);
@@ -198,8 +202,12 @@ pub async fn serve<H: Handler>(
             };
             // Serve requests on this connection until the peer closes it.
             while let Ok((request, _)) = read_frame(&mut stream).await {
-                if request.from != peer {
-                    // Authenticated as one node, claiming to be another: no answer.
+                // Another wire version, authenticated as one node and claiming to be another, or unpinned since
+                // the handshake: no answer.
+                if request.version != crate::wire::NET_VERSION
+                    || request.from != peer
+                    || tls.peer(stream.get_ref().1.peer_certificates()) != Some(peer)
+                {
                     return;
                 }
                 match handler.handle(request).await {

@@ -25,7 +25,7 @@ rm -rf "$DIR" && mkdir -p "$DIR/logs"
 "$CAIRN" keygen --out "$DIR/keys" --committee "$SPEC" --base-port "$BASE" > /dev/null
 $SSH "$HOST" 'rm -rf /root/cairn/ckeys && mkdir -p /root/cairn/ckeys/tls /root/cairn/logs'
 scp -q target/x86_64-unknown-linux-gnu/release/cairn "$HOST:/root/cairn/cairn"
-REMOTE_SHARES=() REMOTE_TLS=("$DIR/keys/tls/ca.pem" "$DIR/keys/tls/fingerprints.json")
+REMOTE_SHARES=() REMOTE_TLS=("$DIR/keys/tls/fingerprints.json")
 for k in $(seq 2 "$N"); do
   REMOTE_SHARES+=("$DIR/keys/party_$k.share")
   REMOTE_TLS+=("$DIR/keys/tls/party_$k.pem" "$DIR/keys/tls/party_$k.key")

@@ -50,6 +50,7 @@ Multi-process cluster:
   cairn node --role party --id party_<k> --bind <addr:port> --peers <peers.json>
              --committee <committee.bin> --tls <dir> --share <file>
              [--state <file>] [--audit-log <file>] [--chains <caip2,caip2>] [--mask-ttl-s <n>]
+             [--metrics-listen <addr:port>]
       A party signs only well-formed checkpoints for its committee key, on the listed chains
       if given, never below its last signed height and never two at one height (kept in
       --state across restarts).
@@ -77,6 +78,9 @@ Multi-process cluster:
       changing the key. Every secret received is checked against the committee's public keys.
       This does not invalidate a leaked copy of the old share.
   cairn kms-cert --out <dir> [--host <name-or-ip>[,<name-or-ip>...]]
+  cairn tls-rotate --tls <dir> --id <node>      (new node certificate, made on this machine)
+  cairn tls-pin --tls <dir> --id <node> --fingerprint <hex>
+  cairn tls-unpin --tls <dir> --id <node> [--fingerprint <hex>]   (revoke one or all)
       Self-signed certificate and key for the KMS endpoint's HTTPS listener.
   cairn mock-chain [--listen <addr:port>] [--chain-id <id>] [--height <n>]
       Minimal CometBFT RPC stand-in for end-to-end runs without a chain.
@@ -158,7 +162,7 @@ fn peers(args: &[String]) -> Result<Option<Peers>, String> {
     net::parse_peers(&text).map(Some)
 }
 
-/// `--tls <dir>`: this node's certificate and key, the cluster CA and the fingerprint table.
+/// `--tls <dir>`: this node's certificate and key and the fingerprint table.
 fn tls(args: &[String], id: NodeId) -> Result<Arc<TlsIdentity>, String> {
     let dir =
         arg(args, "--tls").ok_or("needs --tls <dir> (written by `cairn keygen` as <out>/tls)")?;
@@ -485,6 +489,14 @@ fn run(args: &[String]) -> Result<(), String> {
                     }
                     let mut node = cairn_net::PartyNode::new(id, Arc::new(key), share, fault, policy);
                     node.mask_ttl = Duration::from_secs(ms(args, "--mask-ttl-s", 120)?);
+                    if let Some(addr) = arg(args, "--metrics-listen") {
+                        let stats = node.stats.clone();
+                        let at = cairn_sidecar::kms::serve_text_metrics(&addr, move || {
+                            stats.render()
+                        })
+                        .map_err(|e| format!("metrics on {addr}: {e}"))?;
+                        eprintln!("cairn node {id}: metrics on http://{at}/metrics");
+                    }
                     cairn_net::flat::run_party(listener, node, delay, identity).await;
                     Ok(())
                 });
@@ -907,6 +919,33 @@ fn run(args: &[String]) -> Result<(), String> {
                 "cairn: share of party {number} restored into {}",
                 out.display()
             );
+            Ok(())
+        }
+        Some(cmd @ ("tls-rotate" | "tls-pin" | "tls-unpin")) => {
+            let dir = PathBuf::from(arg(args, "--tls").ok_or("needs --tls <dir>")?);
+            let id: NodeId = arg(args, "--id")
+                .ok_or("needs --id <node>, e.g. party_2 or coordinator")?
+                .parse()
+                .map_err(|e| format!("--id: {e}"))?;
+            let fingerprint = arg(args, "--fingerprint");
+            let out = match cmd {
+                "tls-rotate" => {
+                    let (old, new) = cairn_net::tls::rotate(&dir, id).map_err(|e| e.to_string())?;
+                    json!({ "node": id.to_string(), "fingerprint": new, "replaces": old,
+                        "next": "every peer runs `cairn tls-pin` with this fingerprint; restart this node; then every peer runs `cairn tls-unpin` with the replaced one" })
+                }
+                "tls-pin" => {
+                    let fp = fingerprint.ok_or("tls-pin needs --fingerprint <hex>")?;
+                    cairn_net::tls::pin(&dir, id, &fp).map_err(|e| e.to_string())?;
+                    json!({ "node": id.to_string(), "pinned": fp })
+                }
+                _ => {
+                    let removed = cairn_net::tls::unpin(&dir, id, fingerprint.as_deref())
+                        .map_err(|e| e.to_string())?;
+                    json!({ "node": id.to_string(), "removed": removed })
+                }
+            };
+            println!("{out}");
             Ok(())
         }
         Some("kms-cert") => {

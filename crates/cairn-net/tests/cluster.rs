@@ -255,7 +255,7 @@ async fn links_are_mutually_authenticated() {
         "forged sender must get nothing"
     );
 
-    // A certificate from another CA (same names): the handshake or the first read fails.
+    // A certificate that is not pinned (same names): the handshake or the first read fails.
     let other = ClusterTls::generate(&[NodeId::Coordinator, target]).unwrap();
     let outsider = std::sync::Arc::new(other.identity(NodeId::Coordinator).unwrap());
     let rejected = call(
