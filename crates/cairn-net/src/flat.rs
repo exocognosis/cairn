@@ -39,10 +39,15 @@ struct PartySession {
     message: Vec<u8>,
     round1: Round1,
     commitments: BTreeMap<u8, [u8; 32]>,
+    opened: Instant,
 }
 
-/// Masks sampled ahead of time: id, state, commitment.
-type Presigned = ([u8; 32], Round1, [u8; 32]);
+/// Masks sampled ahead of time: id, state, commitment, and when they were sampled.
+type Presigned = ([u8; 32], Round1, [u8; 32], Instant);
+
+/// Default lifetime of unused masks and of a session waiting for round 3. Masks exist only in
+/// memory; keeping them short-lived bounds what a restored snapshot of a party could replay.
+pub const MASK_TTL: Duration = Duration::from_secs(120);
 
 /// How many unused precomputed mask sets a party keeps; the oldest are dropped beyond this.
 const MAX_PRESIGNS: usize = 16;
@@ -56,6 +61,8 @@ pub struct PartyNode {
     sessions: Mutex<HashMap<[u8; 32], PartySession>>,
     presigns: Mutex<std::collections::VecDeque<Presigned>>,
     policy: Mutex<Policy>,
+    /// Unused masks and half-finished sessions older than this are erased.
+    pub mask_ttl: Duration,
 }
 
 const MAX_SESSIONS: usize = 64;
@@ -82,11 +89,19 @@ impl PartyNode {
             sessions: Mutex::new(HashMap::new()),
             presigns: Mutex::default(),
             policy: Mutex::new(policy),
+            mask_ttl: MASK_TTL,
         }
     }
 
     fn respond(&self, session: [u8; 32], body: Body) -> Body {
         let mut sessions = self.sessions.lock().expect("party sessions");
+        // Erase anything that has waited too long, before looking at the request.
+        let ttl = self.mask_ttl;
+        sessions.retain(|_, state| state.opened.elapsed() < ttl);
+        self.presigns
+            .lock()
+            .expect("presigns")
+            .retain(|(_, _, _, sampled)| sampled.elapsed() < ttl);
         match body {
             Body::Presign => {
                 // Round 1, offline: independent of the message and of who will sign.
@@ -96,7 +111,7 @@ impl PartyNode {
                 if presigns.len() >= MAX_PRESIGNS {
                     presigns.pop_front();
                 }
-                presigns.push_back((id, round1, commitment));
+                presigns.push_back((id, round1, commitment, Instant::now()));
                 Body::PresignCommit { id, commitment }
             }
             Body::M2 {
@@ -117,10 +132,10 @@ impl PartyNode {
                     let mut presigns = self.presigns.lock().expect("presigns");
                     presigns
                         .iter()
-                        .position(|(id, _, _)| *id == presign)
+                        .position(|(id, _, _, _)| *id == presign)
                         .and_then(|pos| presigns.remove(pos))
                 };
-                let Some((_, round1, own)) = taken else {
+                let Some((_, round1, own, _)) = taken else {
                     return refused("unknown or used presign");
                 };
                 let map: BTreeMap<u8, [u8; 32]> = commitments.into_iter().collect();
@@ -140,6 +155,7 @@ impl PartyNode {
                         message,
                         round1,
                         commitments: map,
+                        opened: Instant::now(),
                     },
                 );
                 Body::M2Reveal { w }
@@ -150,6 +166,7 @@ impl PartyNode {
                     message,
                     round1,
                     commitments,
+                    ..
                 }) = sessions.remove(&session)
                 else {
                     return refused("unknown session");
@@ -226,7 +243,10 @@ impl Handler for PartyNode {
 }
 
 /// Per party: (presign id, commitment) pairs fetched ahead of time.
-type CommitmentPool = BTreeMap<u8, std::collections::VecDeque<([u8; 32], [u8; 32])>>;
+type CommitmentPool = BTreeMap<u8, std::collections::VecDeque<([u8; 32], [u8; 32], Instant)>>;
+
+/// The coordinator stops using a prefetched commitment well before the party erases its masks.
+const PRESIGN_MAX_AGE: Duration = Duration::from_secs(60);
 
 /// Drives signatures across a flat committee.
 pub struct FlatCoordinator {
@@ -376,7 +396,9 @@ impl FlatCoordinator {
             .await?;
         let mut pool = self.presigns.lock().expect("presigns");
         for (party, presign) in got {
-            pool.entry(party).or_default().push_back(presign);
+            pool.entry(party)
+                .or_default()
+                .push_back((presign.0, presign.1, Instant::now()));
         }
         Ok(())
     }
@@ -408,7 +430,9 @@ impl FlatCoordinator {
         let session: [u8; 32] = rand::random();
         // Round 1 normally happened ahead of time; fetch for anyone we have nothing from.
         let missing: Vec<u8> = {
-            let pool = self.presigns.lock().expect("presigns");
+            let mut pool = self.presigns.lock().expect("presigns");
+            pool.values_mut()
+                .for_each(|q| q.retain(|(_, _, fetched)| fetched.elapsed() < PRESIGN_MAX_AGE));
             active
                 .iter()
                 .copied()
@@ -422,7 +446,7 @@ impl FlatCoordinator {
             let mut pool = self.presigns.lock().expect("presigns");
             active
                 .iter()
-                .filter_map(|i| Some((*i, pool.get_mut(i)?.pop_front()?)))
+                .filter_map(|i| pool.get_mut(i)?.pop_front().map(|(id, c, _)| (*i, (id, c))))
                 .collect()
         };
         if mine.len() != active.len() {
@@ -515,10 +539,19 @@ impl FlatCoordinator {
             (0..self.key.params.reps).any(|rep| responses.values().all(|z| z[rep].is_some()));
         let signature = mithril::combine(&self.key, message, &revealed, &responses);
         if signature.is_none() && complete && self.suspicious(&revealed, &responses, message) {
-            return Err(vec![NetFault {
-                culprit: None,
-                kind: NetFaultKind::Unattributed("responses do not verify".into()),
-            }]);
+            // Name the sender if the key carries per-subset public keys; otherwise rotate.
+            return Err(
+                match mithril::blame(&self.key, message, &revealed, &responses) {
+                    Some(guilty) if !guilty.is_empty() => guilty
+                        .into_iter()
+                        .map(|i| fault(NodeId::Party(i + 1), NetFaultKind::InconsistentResponse))
+                        .collect(),
+                    _ => vec![NetFault {
+                        culprit: None,
+                        kind: NetFaultKind::Unattributed("responses do not verify".into()),
+                    }],
+                },
+            );
         }
         Ok(signature)
     }
@@ -689,6 +722,17 @@ impl LocalCommittee {
         faults: &[(NodeId, FaultMode)],
         delay: Duration,
     ) -> std::io::Result<Self> {
+        Self::start_with(t, n, faults, delay, MASK_TTL).await
+    }
+
+    /// As [`start`](Self::start), with a chosen lifetime for unused masks.
+    pub async fn start_with(
+        t: usize,
+        n: usize,
+        faults: &[(NodeId, FaultMode)],
+        delay: Duration,
+        mask_ttl: Duration,
+    ) -> std::io::Result<Self> {
         let (key, parties) = mithril::keygen(t, n, &mut OsRng)
             .ok_or_else(|| std::io::Error::other("no parameters"))?;
         let key = Arc::new(key);
@@ -705,7 +749,9 @@ impl LocalCommittee {
                 .find(|(f, _)| *f == id)
                 .map(|(_, m)| *m)
                 .unwrap_or_default();
-            let node = PartyNode::new(id, key.clone(), party, fault, Policy::ephemeral(&key.pk));
+            let mut node =
+                PartyNode::new(id, key.clone(), party, fault, Policy::ephemeral(&key.pk));
+            node.mask_ttl = mask_ttl;
             tasks.push(tokio::spawn(run_party(
                 listener,
                 node,

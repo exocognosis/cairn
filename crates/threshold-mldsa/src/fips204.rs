@@ -30,9 +30,22 @@ pub type PolyVec = Vec<Poly>;
 /// `K x L` matrix in the NTT domain.
 pub type MatrixHat = Vec<Vec<Poly>>;
 
+/// `x mod Q` in `[0, Q)`, for any `x` with `|x| < 2^62`.
+///
+/// Barrett reduction with masks instead of division and branches, so the running time does not
+/// depend on the value. (The compiler is not obliged to keep it that way; nothing here has been
+/// checked at the machine-code level.)
 #[inline]
 pub fn red(x: i64) -> i32 {
-    x.rem_euclid(Q as i64) as i32
+    const SHIFT: u32 = 86;
+    const M: i128 = (1i128 << SHIFT) / Q as i128;
+    let quotient = ((x as i128 * M) >> SHIFT) as i64;
+    // quotient is floor(x / Q) or one less, so r is in (-Q, 2Q).
+    let mut r = x - quotient * Q as i64;
+    r += (r >> 63) & Q as i64;
+    let d = r - Q as i64;
+    r = d + ((d >> 63) & Q as i64);
+    r as i32
 }
 
 #[inline]
@@ -59,11 +72,9 @@ pub fn fq_inv(a: i32) -> i32 {
 /// Representative in `(-Q/2, Q/2]`.
 #[inline]
 pub fn centered(x: i32) -> i32 {
-    if x > Q / 2 {
-        x - Q
-    } else {
-        x
-    }
+    // Subtract Q exactly when x > Q / 2, without branching on x.
+    let above = (Q / 2 - x) >> 31;
+    x - (Q & above)
 }
 
 pub fn inf_norm(v: &[Poly]) -> i32 {
@@ -587,6 +598,38 @@ pub fn verify_standard(
 mod tests {
     use super::*;
     use ml_dsa::{ExpandedSigningKey, MlDsa65};
+
+    #[test]
+    fn branch_free_reduction_matches_division() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let q = Q as i64;
+        let edges = [
+            0,
+            1,
+            -1,
+            q - 1,
+            q,
+            q + 1,
+            -q,
+            -q - 1,
+            -q + 1,
+            2 * q,
+            -2 * q,
+            i64::MAX >> 2,
+            -(i64::MAX >> 2),
+        ];
+        for x in edges
+            .into_iter()
+            .chain((0..200_000).map(|_| rng.gen_range(-(1i64 << 61)..(1i64 << 61))))
+        {
+            assert_eq!(red(x) as i64, x.rem_euclid(q), "red({x})");
+        }
+        for x in (0..Q).step_by(997).chain([0, 1, Q / 2, Q / 2 + 1, Q - 1]) {
+            let expect = if x > Q / 2 { x - Q } else { x };
+            assert_eq!(centered(x), expect, "centered({x})");
+        }
+    }
 
     #[test]
     fn ntt_round_trip() {

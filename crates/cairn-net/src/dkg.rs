@@ -494,7 +494,7 @@ impl DkgParty {
         self.check_set(&key_reveals, |k| k.index, None)?;
         let transcript = self.transcript();
         let mut t_full = fips204::vec_zero(K);
-        let mut seen = 0;
+        let mut subset_keys = BTreeMap::new();
         for reveal in &key_reveals {
             let message = final_bytes(&transcript, reveal.index, &reveal.partial);
             UnparsedPublicKey::new(&ED25519, &self.roster.identities[reveal.index as usize])
@@ -518,10 +518,10 @@ impl DkgParty {
                 }
                 let t_s = mithril::unpack_k(packed).ok_or("malformed partial key")?;
                 t_full = fips204::vec_add(&t_full, &t_s);
-                seen += 1;
+                subset_keys.insert(subset.clone(), t_s);
             }
         }
-        if seen != self.roster.subsets().len() {
+        if subset_keys.len() != self.roster.subsets().len() {
             return Err("not every subset contributed a partial key".into());
         }
         let key = GroupKey::from_parts(
@@ -529,6 +529,7 @@ impl DkgParty {
             self.roster.n(),
             self.rho,
             &t_full,
+            subset_keys,
         )
         .ok_or("no parameter set for this committee")?;
         Ok((key, PartyKey::from_shares(self.index, self.secrets)))

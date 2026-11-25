@@ -101,7 +101,7 @@ async fn stalled_party_is_replaced_by_the_spare() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_wrong_response_is_detected_and_rotated_away() {
+async fn a_wrong_response_names_its_sender() {
     let (_committee, mut coordinator) =
         committee(3, 4, &[(NodeId::Party(1), FaultMode::BadResponse)]).await;
     let msg = checkpoint(&coordinator.key().pk, 100, "bad");
@@ -111,15 +111,15 @@ async fn a_wrong_response_is_detected_and_rotated_away() {
         &msg,
         &signature
     ));
-    assert!(report.retries >= 1);
-    assert!(report
-        .faults
-        .iter()
-        .all(|f| f.culprit.is_none() && matches!(f.kind, NetFaultKind::Unattributed(_))));
-    assert!(
-        !report.signers.contains(&NodeId::Party(1)),
-        "{:?}",
-        report.signers
+    // Anyone can check a single party's response against public values, so the bad one is
+    // named and excluded on the first execution it spoils.
+    assert_eq!(report.retries, 1);
+    assert_eq!(report.faults.len(), 1);
+    assert_eq!(report.faults[0].culprit, Some(NodeId::Party(1)));
+    assert_eq!(report.faults[0].kind, NetFaultKind::InconsistentResponse);
+    assert_eq!(
+        report.signers,
+        vec![NodeId::Party(2), NodeId::Party(3), NodeId::Party(4)]
     );
 }
 
@@ -219,4 +219,50 @@ async fn a_party_answers_a_session_once() {
     // ...and then the masks are erased: the same challenge, or any other, gets nothing.
     assert!(matches!(ask(1, m3()).await, Body::Refused { .. }));
     assert!(matches!(ask(2, m3()).await, Body::Refused { .. }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unused_masks_expire() {
+    let ttl = Duration::from_millis(150);
+    let committee = LocalCommittee::start_with(2, 3, &[], Duration::ZERO, ttl)
+        .await
+        .unwrap();
+    let link = Link::new(
+        TIMEOUT,
+        Duration::ZERO,
+        committee.identity(NodeId::Coordinator),
+    );
+    let ask = |session: u8, body: Body| {
+        let frame = Frame {
+            version: 2,
+            from: NodeId::Coordinator,
+            to: NodeId::Party(1),
+            session: [session; 32],
+            body,
+        };
+        let (addr, link) = (committee.peers[&NodeId::Party(1)].clone(), link.clone());
+        async move { call(&addr, &link, &frame).await.unwrap().reply.body }
+    };
+    let m2 = |id, commitment| Body::M2 {
+        message: checkpoint(&committee.key.pk, 100, "ttl"),
+        presign: id,
+        commitments: vec![(0, commitment)],
+    };
+    // Fresh masks are usable...
+    let Body::PresignCommit { id, commitment } = ask(1, Body::Presign).await else {
+        panic!()
+    };
+    assert!(matches!(
+        ask(1, m2(id, commitment)).await,
+        Body::M2Reveal { .. }
+    ));
+    // ...and ones left unused past their lifetime are gone.
+    let Body::PresignCommit { id, commitment } = ask(2, Body::Presign).await else {
+        panic!()
+    };
+    tokio::time::sleep(ttl * 2).await;
+    assert!(matches!(
+        ask(2, m2(id, commitment)).await,
+        Body::Refused { .. }
+    ));
 }

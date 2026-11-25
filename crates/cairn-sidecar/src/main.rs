@@ -49,7 +49,7 @@ Multi-process cluster:
       a roster and TLS certificates on one machine for local use.
   cairn node --role party --id party_<k> --bind <addr:port> --peers <peers.json>
              --committee <committee.bin> --tls <dir> --share <file>
-             [--state <file>] [--audit-log <file>] [--chains <caip2,caip2>]
+             [--state <file>] [--audit-log <file>] [--chains <caip2,caip2>] [--mask-ttl-s <n>]
       A party signs only well-formed checkpoints for its committee key, on the listed chains
       if given, never below its last signed height and never two at one height (kept in
       --state across restarts).
@@ -446,7 +446,8 @@ fn run(args: &[String]) -> Result<(), String> {
                     if arg(args, "--state").is_none() {
                         eprintln!("cairn node {id}: no --state file; the last signed height is forgotten on restart");
                     }
-                    let node = cairn_net::PartyNode::new(id, Arc::new(key), share, fault, policy);
+                    let mut node = cairn_net::PartyNode::new(id, Arc::new(key), share, fault, policy);
+                    node.mask_ttl = Duration::from_secs(ms(args, "--mask-ttl-s", 120)?);
                     cairn_net::flat::run_party(listener, node, delay, identity).await;
                     Ok(())
                 });

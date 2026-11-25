@@ -86,6 +86,9 @@ pub struct GroupKey {
     pub tr: [u8; 64],
     pub t1: PolyVec,
     pub params: Params,
+    /// `t_S = A s1_S + s2_S` for every subset: public, and what lets anyone check a single
+    /// party's response. Empty for keys made before these were kept.
+    pub subset_keys: BTreeMap<Subset, PolyVec>,
     a_hat: MatrixHat,
 }
 
@@ -166,17 +169,28 @@ pub fn z_from_wire(v: &[u8]) -> Option<PolyVec> {
 impl GroupKey {
     /// Public group description for distribution to every node (no secrets).
     pub fn to_bytes(&self) -> Vec<u8> {
+        let subset_keys: Vec<(Subset, Vec<u8>)> = self
+            .subset_keys
+            .iter()
+            .map(|(s, t)| (s.clone(), pack23(t)))
+            .collect();
         bincode::serialize(&(
             self.params.t as u8,
             self.params.n as u8,
             self.pk.to_vec(),
             flat(&self.t1),
+            subset_keys,
         ))
         .expect("group key encodes")
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        let (t, n, pk, t1): (u8, u8, Vec<u8>, Vec<i32>) = bincode::deserialize(bytes).ok()?;
+        type Wire = (u8, u8, Vec<u8>, Vec<i32>, Vec<(Subset, Vec<u8>)>);
+        let (t, n, pk, t1, wire_keys): Wire = bincode::deserialize(bytes).ok()?;
+        let mut subset_keys = BTreeMap::new();
+        for (subset, packed) in wire_keys {
+            subset_keys.insert(subset, unpack23(&packed, K)?);
+        }
         let pk: [u8; PUBLIC_KEY_BYTES] = pk.try_into().ok()?;
         let rho: [u8; 32] = pk[..32].try_into().ok()?;
         let mut tr = [0u8; 64];
@@ -187,6 +201,7 @@ impl GroupKey {
             tr,
             t1: polys(&t1, K)?,
             params: params_65(t as usize, n as usize)?,
+            subset_keys,
             a_hat: expand_a(&rho),
         })
     }
@@ -217,7 +232,13 @@ impl PartyKey {
 
 impl GroupKey {
     /// Build the public key material from a seed `rho` and the full `t = A s1 + s2`.
-    pub fn from_parts(t: usize, n: usize, rho: [u8; 32], t_full: &PolyVec) -> Option<Self> {
+    pub fn from_parts(
+        t: usize,
+        n: usize,
+        rho: [u8; 32],
+        t_full: &PolyVec,
+        subset_keys: BTreeMap<Subset, PolyVec>,
+    ) -> Option<Self> {
         let (pk, t1, tr) = fips204::public_key_from_t(&rho, t_full);
         Some(Self {
             pk,
@@ -225,6 +246,7 @@ impl GroupKey {
             tr,
             t1,
             params: params_65(t, n)?,
+            subset_keys,
             a_hat: expand_a(&rho),
         })
     }
@@ -312,11 +334,16 @@ pub fn keygen<R: Rng + CryptoRng>(
         })
         .collect();
     let (mut s1, mut s2) = (vec_zero(L), vec_zero(K));
+    let mut subset_keys = BTreeMap::new();
     for subset in subsets(n, n - t + 1) {
         let part1: PolyVec = (0..L).map(|_| short_poly(rng)).collect();
         let part2: PolyVec = (0..K).map(|_| short_poly(rng)).collect();
         s1 = vec_add(&s1, &part1);
         s2 = vec_add(&s2, &part2);
+        subset_keys.insert(
+            subset.clone(),
+            vec_add(&mat_vec_coeff(&a_hat, &part1), &part2),
+        );
         for i in &subset {
             parties[*i as usize]
                 .shares
@@ -332,6 +359,7 @@ pub fn keygen<R: Rng + CryptoRng>(
             tr,
             t1,
             params,
+            subset_keys,
             a_hat,
         },
         parties,
@@ -643,6 +671,52 @@ pub fn equation_fails(
     })
 }
 
+/// Which parties sent a response that cannot be an honest one.
+///
+/// Everything needed is public. For party `i` with partial key `t_i` (the sum of the `t_S` it
+/// was assigned), `z2_i = w_i - (A z1_i - c t_i)` is the half of its response it did not send.
+/// An honest party only answers when `||(z1_i / nu, z2_i)||_2 <= r`, so the same test, with
+/// slack for rounding, can be run by anyone. A response that was altered turns `z2_i` into an
+/// essentially uniform vector and fails by a wide margin.
+///
+/// Returns the indices that fail, or `None` if this key carries no per-subset public keys.
+pub fn blame(
+    key: &GroupKey,
+    message: &[u8],
+    revealed: &BTreeMap<u8, Vec<PolyVec>>,
+    responses: &BTreeMap<u8, Vec<Option<PolyVec>>>,
+) -> Option<Vec<u8>> {
+    let active: Vec<u8> = revealed.keys().copied().collect();
+    let partition = recover_partition(&key.params, &active)?;
+    let mu = message_representative(&key.tr, &[], message);
+    // Rounding moves each coordinate by at most a half (a twelfth for the scaled part).
+    let bound = key.params.r + (DIM as f64).sqrt() / 2.0 + 1.0;
+    let mut guilty = Vec::new();
+    for (party, answers) in responses {
+        let mut t_part = vec_zero(K);
+        for subset in partition.get(party)? {
+            t_part = vec_add(&t_part, key.subset_keys.get(subset)?);
+        }
+        let bad = answers.iter().enumerate().any(|(rep, answer)| {
+            let Some(z1) = answer else { return false };
+            let c = sample_in_ball(&challenge(&mu, revealed, rep));
+            let approx = vec_sub(&mat_vec_coeff(&key.a_hat, z1), &challenge_mul(&c, &t_part));
+            let z2 = vec_sub(&revealed[party][rep], &approx);
+            let sq = |v: &PolyVec, scale: f64| -> f64 {
+                v.iter()
+                    .flatten()
+                    .map(|x| (centered(*x) as f64 / scale).powi(2))
+                    .sum()
+            };
+            sq(z1, NU) + sq(&z2, 1.0) > bound * bound
+        });
+        if bad {
+            guilty.push(*party);
+        }
+    }
+    Some(guilty)
+}
+
 /// What one in-process signature cost.
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
@@ -791,6 +865,43 @@ mod tests {
             .map(|i| std::array::from_fn(|j| ((i * 7919 + j * 104729) % 8_380_417) as i32))
             .collect();
         assert_eq!(z_from_wire(&z_to_wire(&z)).unwrap(), z);
+    }
+
+    #[test]
+    fn a_wrong_response_is_pinned_on_its_sender() {
+        let (key, parties) = keygen(3, 4, &mut OsRng).unwrap();
+        let active = [0u8, 1, 3];
+        let msg = b"blame";
+        let (mut states, mut commitments) = (Vec::new(), BTreeMap::new());
+        for i in active {
+            let (state, cmt) = parties[i as usize].round1(&key, &mut OsRng);
+            commitments.insert(i, cmt);
+            states.push(state);
+        }
+        let revealed: BTreeMap<u8, Vec<PolyVec>> =
+            states.iter().map(|s| (s.index, s.reveal())).collect();
+        let mut responses = BTreeMap::new();
+        for state in states {
+            let i = state.index;
+            responses.insert(
+                i,
+                parties[i as usize]
+                    .round3(&key, state, msg, &commitments, &revealed)
+                    .unwrap(),
+            );
+        }
+        // Honest responses: nobody is blamed, whether or not the execution yields a signature.
+        assert_eq!(blame(&key, msg, &revealed, &responses), Some(vec![]));
+        // Party 1 alters one coefficient of one response.
+        let altered = responses.get_mut(&1).unwrap().iter_mut().flatten().next();
+        if let Some(z) = altered {
+            z[0][0] = (z[0][0] + 1) % fips204::Q;
+            assert_eq!(blame(&key, msg, &revealed, &responses), Some(vec![1]));
+        }
+        // The keys survive serialization.
+        let restored = GroupKey::from_bytes(&key.to_bytes()).unwrap();
+        assert_eq!(restored.subset_keys, key.subset_keys);
+        assert_eq!(restored.pk, key.pk);
     }
 
     #[test]
