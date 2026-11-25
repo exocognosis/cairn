@@ -5,7 +5,7 @@ use std::fmt;
 use std::str::FromStr;
 use threshold_mldsa::{Active, AdditiveShare, Path};
 
-pub const NET_VERSION: u8 = 2;
+pub const NET_VERSION: u8 = 3;
 /// Largest accepted frame (a share-check reply carries nine 6 kB values).
 pub const MAX_FRAME: usize = 16 << 20;
 
@@ -95,6 +95,15 @@ pub enum Outcome {
     },
 }
 
+/// A node's signature over a statement, made with its TLS key, and the certificate that
+/// carries the matching public key. The reader accepts it only if that certificate is pinned
+/// for the node that is supposed to have signed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attestation {
+    pub cert: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Body {
     // Requests.
@@ -142,8 +151,10 @@ pub enum Body {
     },
     /// Round 3: here are the other parties' `w` values (packed, 23 bits per coefficient; the
     /// recipient already has its own); answer where your rejection test passes.
+    /// With them, every other party's attestation to the commitment set it was shown.
     M3 {
         revealed: Vec<(u8, Vec<Vec<u8>>)>,
+        attestations: Vec<(u8, Attestation)>,
     },
 
     // Replies.
@@ -156,8 +167,10 @@ pub enum Body {
         id: [u8; 32],
         commitment: [u8; 32],
     },
+    /// The openings, and the party's signature over the commitment set it was shown.
     M2Reveal {
         w: Vec<Vec<u8>>,
+        attestation: Attestation,
     },
     /// One entry per parallel repetition: `z1`, or `None` where the party's test rejected.
     M3Response {

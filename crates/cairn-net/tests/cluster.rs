@@ -224,7 +224,7 @@ async fn links_are_mutually_authenticated() {
     let target = signer(1, 1);
     let addr = cluster.peers[&target].clone();
     let prepare = |from: NodeId, to: NodeId| Frame {
-        version: 2,
+        version: cairn_net::wire::NET_VERSION,
         from,
         to,
         session: [7; 32],

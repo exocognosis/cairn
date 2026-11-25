@@ -361,9 +361,58 @@ pub struct TlsIdentity {
     connector: TlsConnector,
     acceptor: TlsAcceptor,
     pins: Arc<Pins>,
+    cert_der: Vec<u8>,
+    signing: Arc<dyn rustls::sign::SigningKey>,
 }
 
+/// Prefix of everything signed outside the TLS handshake. A TLS 1.3 handshake signature
+/// starts with 64 spaces, so the two can never be confused.
+const ATTEST_DOMAIN: &[u8] = b"cairn/attest/v1\0";
+
 impl TlsIdentity {
+    /// Sign `statement` with this node's TLS key. Returns the certificate and the signature.
+    pub fn attest(&self, statement: &[u8]) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+        use rustls::SignatureScheme::{ECDSA_NISTP256_SHA256, ECDSA_NISTP384_SHA384, ED25519};
+        let signer = self
+            .signing
+            .choose_scheme(&[ECDSA_NISTP256_SHA256, ECDSA_NISTP384_SHA384, ED25519])
+            .ok_or_else(|| invalid("TLS key cannot sign statements"))?;
+        let signature = signer
+            .sign(&[ATTEST_DOMAIN, statement].concat())
+            .map_err(invalid)?;
+        Ok((self.cert_der.clone(), signature))
+    }
+
+    /// Did `node` sign `statement`? True only if `cert` is pinned for `node` in this node's
+    /// own table right now and `signature` verifies under the certificate's key.
+    pub fn attested_by(
+        &self,
+        node: NodeId,
+        cert: &[u8],
+        statement: &[u8],
+        signature: &[u8],
+    ) -> bool {
+        if self.pins.node(cert) != Some(node) {
+            return false;
+        }
+        let der = CertificateDer::from(cert);
+        let Ok(parsed) = webpki::EndEntityCert::try_from(&der) else {
+            return false;
+        };
+        let message = [ATTEST_DOMAIN, statement].concat();
+        [
+            webpki::ring::ECDSA_P256_SHA256,
+            webpki::ring::ECDSA_P384_SHA384,
+            webpki::ring::ED25519,
+        ]
+        .iter()
+        .any(|algorithm| {
+            parsed
+                .verify_signature(*algorithm, &message, signature)
+                .is_ok()
+        })
+    }
+
     fn from_pem(
         id: NodeId,
         cert_pem: &str,
@@ -380,6 +429,8 @@ impl TlsIdentity {
             rustls_pemfile::private_key(&mut key_pem.as_bytes())?
                 .ok_or_else(|| invalid("no private key in PEM"))
         };
+        let cert_der = chain[0].to_vec();
+        let signing = rustls::crypto::ring::sign::any_supported_type(&key()?).map_err(invalid)?;
         let versions = &[&rustls::version::TLS13];
         let client = ClientConfig::builder_with_provider(provider.clone())
             .with_protocol_versions(versions)
@@ -399,6 +450,8 @@ impl TlsIdentity {
             connector: TlsConnector::from(Arc::new(client)),
             acceptor: TlsAcceptor::from(Arc::new(server)),
             pins,
+            cert_der,
+            signing,
         })
     }
 

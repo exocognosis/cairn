@@ -79,14 +79,10 @@ async fn a_committee_generates_its_key_without_a_dealer_and_then_signs() {
             share,
             FaultMode::None,
             Policy::ephemeral(&pk),
+            Arc::new(tls.identity(*id).unwrap()),
         );
         stats.push(node.stats.clone());
-        signing_tasks.push(tokio::spawn(run_party(
-            listener,
-            node,
-            Duration::ZERO,
-            Arc::new(tls.identity(*id).unwrap()),
-        )));
+        signing_tasks.push(tokio::spawn(run_party(listener, node, Duration::ZERO)));
         key = Some(committee);
     }
 

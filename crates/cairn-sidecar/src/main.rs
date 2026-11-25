@@ -492,7 +492,14 @@ fn run(args: &[String]) -> Result<(), String> {
                     if arg(args, "--state").is_none() {
                         eprintln!("cairn node {id}: no --state file; the last signed height is forgotten on restart");
                     }
-                    let mut node = cairn_net::PartyNode::new(id, Arc::new(key), share, fault, policy);
+                    let mut node = cairn_net::PartyNode::new(
+                        id,
+                        Arc::new(key),
+                        share,
+                        fault,
+                        policy,
+                        identity,
+                    );
                     node.mask_ttl = Duration::from_secs(ms(args, "--mask-ttl-s", 120)?);
                     if let Some(addr) = arg(args, "--metrics-listen") {
                         let stats = node.stats.clone();
@@ -502,7 +509,7 @@ fn run(args: &[String]) -> Result<(), String> {
                         .map_err(|e| format!("metrics on {addr}: {e}"))?;
                         eprintln!("cairn node {id}: metrics on http://{at}/metrics");
                     }
-                    cairn_net::flat::run_party(listener, node, delay, identity).await;
+                    cairn_net::flat::run_party(listener, node, delay).await;
                     Ok(())
                 });
             }

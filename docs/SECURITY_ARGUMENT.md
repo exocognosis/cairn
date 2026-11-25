@@ -31,33 +31,40 @@ section lists the gaps in one place; a reviewer should start there.
 cairn's parties talk only to the coordinator, which forwards commitments and openings.
 
 **Claim.** A corrupt coordinator gains nothing that a network adversary in the paper's model
-with the ability to drop messages would not have, except the ability to show different
-honest parties different sets of commitments (equivocation), discussed below.
+with the ability to drop messages would not have. In particular, all honest parties that
+answer in a session saw the same message and the same set of commitments.
 
 **Argument.**
 - A party checks at round 2 that the commitment listed for itself is the one it made, and
   fixes the whole set before revealing anything. At round 3 it checks every opening against
   that fixed set and uses its own opening from its own memory, never from the coordinator
   (`PartyNode::respond`, `PartyKey::round3`). So for each honest party, every `w` that
-  enters its challenge was committed before that party revealed its own. This is the
-  commit-then-reveal property the protocol needs, held locally by each honest party.
+  enters its challenge was committed before that party revealed its own.
+- **Agreement on the set.** With its opening, a party returns a signature, made with its
+  TLS key, over the session, a hash of the message and the full commitment set it was shown
+  (`commitment_statement`). At round 3 the coordinator must present every other active
+  party's signature, and a party answers only if each one verifies over the statement the
+  party itself signed, under a certificate its own table pins for that party. An honest
+  party signs only the set it was shown, so if an honest party answers, every honest active
+  party was shown the same session, message and set. The session is in the statement, so a
+  signature cannot be moved to another session. Tested by
+  `a_party_refuses_when_another_was_shown_a_different_commitment_set`: a different set, a
+  different message, a signature replayed from another session, a missing signature and a
+  signature in the wrong party's slot are each refused.
 - The coordinator learns the openings `w` and the responses `z`. Both are public values in
   the paper's protocol.
 - The coordinator cannot make a party answer twice with one mask: a mask is removed from
   the party's pool when round 2 starts and its session state is removed when round 3 is
   answered or fails (section 2).
 
-**Where it stops: equivocation.** The paper's proof is for parties that agree on the set of
-commitments. A corrupt coordinator can give party A the set S and party B a different set
-S'. Each then answers under its own challenge. We argue informally that this does not help:
-the two responses are under different challenges unless the sums of openings and all inputs
-to the challenge hash agree, and responses under different challenges do not combine into a
-signature; each response on its own is still one answer per mask, which the rejection step
-makes independent of the share. But "does not combine" is not a reduction. **This is the
-main open point of this document.** A fix that removes the question is cheap and not yet
-implemented: have each party include a hash of the commitment set in what it signs with its
-identity key in round 2, and have every party check the others' round-2 signatures at
-round 3, so that an honest party answers only if all active parties saw the same set.
+**Rests on.** Parties' pin tables naming the right certificates for each other (section 6),
+and the TLS keys' signature scheme (ECDSA P-256 as generated) being unforgeable. The TLS key
+signs these statements under a prefix that a TLS 1.3 handshake signature cannot start with.
+
+**Where it stops.** This gives the agreement the paper's model takes from its channels; it
+does not re-prove the paper's theorem in the relayed setting. A corrupt party can sign
+anything, as it can say anything in the paper's model. Through v0.4.0 there was no such check
+and the argument for this section was informal.
 
 ## 2. Masks made ahead of time
 
@@ -177,9 +184,11 @@ the node it addressed and re-checks before reusing a connection. The table is lo
 machine and changes only when its operator edits it.
 
 **Where it stops.** Trust in the table is trust in how fingerprints were exchanged, which is
-out of band. Certificates carry no expiry that is checked. A party authenticates the
-coordinator, not the other parties: everything a party believes about other parties'
-messages comes through the coordinator and is covered only by the checks in section 1.
+out of band. Certificates carry no expiry that is checked. A party has no connection to the
+other parties: what it believes about them comes through the coordinator, authenticated only
+where section 1 says so (their signatures over the commitment set). A node's TLS key now
+also signs those statements, so stealing it lets the thief vouch for commitment sets in that
+party's name as well as open connections; it still yields no share.
 
 ## 7. Key generation and share recovery over the relay
 
@@ -213,8 +222,9 @@ corrupt coordinator.
 
 ## Gaps, in order of importance
 
-1. **Equivocation by the coordinator (section 1).** Argued informally; no reduction. A
-   round-2 agreement check between parties would remove it.
+1. **The relayed setting as a whole (section 1).** Parties now agree on the commitment set
+   by signature, which removes the equivocation question, but nobody has re-derived the
+   paper's theorem for a relay with this check in place.
 2. **Concurrent sessions (sections 2, 3).** The argument needs the paper's protocol to be
    secure when sessions overlap. Not verified against the paper's theorem statement.
 3. **Publishing per-subset public keys (section 4).** Believed covered by the key-hiding

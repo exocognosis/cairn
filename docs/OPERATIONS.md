@@ -120,9 +120,11 @@ Both may be up at once. The parties, not the coordinators, enforce one checkpoin
 - There is no compatibility promise for share, committee or policy-state files between
   versions yet, and no migration tool. Keep the cold backup and the old binary until the
   upgraded committee has signed.
-- `scripts/upgrade-rehearsal.sh` rehearses exactly this on one machine, from a published
-  release to the current build: v0.3.0 to v0.4.0-and-later kept signing at every step, on the
-  files v0.3.0 wrote. An upgrade across a wire-version change has not been rehearsed.
+- `scripts/upgrade-rehearsal.sh` rehearses both on one machine and one key: v0.3.0 to v0.4.0
+  rolling (wire version 2 in both), then to the current build with a stop (wire version 3),
+  on the files v0.3.0 wrote, with a verified certificate after every step.
+- **v0.4.0 and earlier to anything later is a wire-version change**: parties now sign the
+  commitment set they are shown and refuse to answer without the others' signatures.
 
 ## Latency
 

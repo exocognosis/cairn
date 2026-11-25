@@ -39,7 +39,7 @@ async fn start(dir: &Path) -> String {
 
 async fn reaches(addr: &str, link: &Link) -> bool {
     let frame = Frame {
-        version: 2,
+        version: cairn_net::wire::NET_VERSION,
         from: COORD,
         to: PARTY,
         session: [3; 32],

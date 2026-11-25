@@ -23,7 +23,7 @@ use crate::node::{FaultMode, Peers};
 use crate::policy::Policy;
 use crate::tls::{ClusterTls, TlsIdentity};
 use crate::transport::{call, serve, CallError, Handler, Link, Pool, Reply};
-use crate::wire::{Body, Frame, NodeId, NET_VERSION};
+use crate::wire::{Attestation, Body, Frame, NodeId, NET_VERSION};
 use futures_util::future::join_all;
 use rand::rngs::OsRng;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -65,6 +65,28 @@ pub struct PartyNode {
     /// Unused masks and half-finished sessions older than this are erased.
     pub mask_ttl: Duration,
     pub stats: Arc<PartyStats>,
+    /// Signs the commitment set this party was shown and checks the other parties' signatures.
+    tls: Arc<TlsIdentity>,
+}
+
+/// What a party signs in round 2: this session, this message, exactly these commitments.
+/// Every party answers round 3 only if every other active party signed the same statement,
+/// so a coordinator cannot show different parties different commitment sets.
+pub fn commitment_statement(
+    session: &[u8; 32],
+    message: &[u8],
+    commitments: &BTreeMap<u8, [u8; 32]>,
+) -> Vec<u8> {
+    use sha3::{Digest, Sha3_256};
+    let mut out = b"commitment-set\0".to_vec();
+    out.extend_from_slice(session);
+    out.extend_from_slice(&Sha3_256::digest(message));
+    out.push(commitments.len() as u8);
+    for (index, commitment) in commitments {
+        out.push(*index);
+        out.extend_from_slice(commitment);
+    }
+    out
 }
 
 /// What a party has done since it started, for its operator's monitoring. Counts only:
@@ -181,6 +203,7 @@ impl PartyNode {
         share: PartyKey,
         fault: FaultMode,
         policy: Policy,
+        tls: Arc<TlsIdentity>,
     ) -> Self {
         Self {
             id,
@@ -192,6 +215,7 @@ impl PartyNode {
             policy: Mutex::new(policy),
             mask_ttl: MASK_TTL,
             stats: Arc::default(),
+            tls,
         }
     }
 
@@ -250,6 +274,12 @@ impl PartyNode {
                 if sessions.len() >= MAX_SESSIONS {
                     sessions.clear();
                 }
+                // Sign the set we were shown before revealing anything.
+                let statement = commitment_statement(&session, &message, &map);
+                let Ok((cert, signature)) = self.tls.attest(&statement) else {
+                    return refused("cannot sign the commitment set");
+                };
+                let attestation = Attestation { cert, signature };
                 let w = round1.reveal().iter().map(mithril::w_to_wire).collect();
                 sessions.insert(
                     session,
@@ -260,9 +290,12 @@ impl PartyNode {
                         opened: Instant::now(),
                     },
                 );
-                Body::M2Reveal { w }
+                Body::M2Reveal { w, attestation }
             }
-            Body::M3 { revealed } => {
+            Body::M3 {
+                revealed,
+                attestations,
+            } => {
                 // Whatever happens, this session's masks are used up now.
                 let Some(PartySession {
                     message,
@@ -273,6 +306,23 @@ impl PartyNode {
                 else {
                     return refused("unknown session");
                 };
+                // Every other active party must have signed the very set we signed: same
+                // session, same message, same commitments. Checked against our own pin table.
+                let statement = commitment_statement(&session, &message, &commitments);
+                for index in commitments.keys().filter(|i| **i != self.share.index) {
+                    let signed = attestations.iter().any(|(from, a)| {
+                        from == index
+                            && self.tls.attested_by(
+                                NodeId::Party(index + 1),
+                                &a.cert,
+                                &statement,
+                                &a.signature,
+                            )
+                    });
+                    if !signed {
+                        return refused("another party did not sign this commitment set");
+                    }
+                }
                 // Our own openings come from our own state, never from the coordinator.
                 let mut map: BTreeMap<u8, Vec<PolyVec>> = BTreeMap::new();
                 map.insert(self.share.index, round1.reveal());
@@ -567,7 +617,7 @@ impl FlatCoordinator {
             self.fetch_presigns(report, &missing).await?;
         };
         let commitments: Vec<(u8, [u8; 32])> = mine.iter().map(|(i, (_, c))| (*i, *c)).collect();
-        let wire_w = self
+        let round2 = self
             .round_with(
                 report,
                 active,
@@ -578,14 +628,32 @@ impl FlatCoordinator {
                     commitments: commitments.clone(),
                 },
                 |b| {
-                    if let Body::M2Reveal { w } = b {
-                        Some(w)
+                    if let Body::M2Reveal { w, attestation } = b {
+                        Some((w, attestation))
                     } else {
                         None
                     }
                 },
             )
             .await?;
+        // A party whose signature over the set does not verify would make every honest party
+        // refuse round 3; name it here instead.
+        let statement =
+            commitment_statement(&session, message, &commitments.iter().copied().collect());
+        if let Some((i, _)) = round2.iter().find(|(i, (_, a))| {
+            !self
+                .tls
+                .attested_by(NodeId::Party(**i + 1), &a.cert, &statement, &a.signature)
+        }) {
+            return Err(vec![fault(
+                NodeId::Party(i + 1),
+                NetFaultKind::Refused("commitment-set signature does not verify".into()),
+            )]);
+        }
+        let attestations: Vec<(u8, Attestation)> =
+            round2.iter().map(|(i, (_, a))| (*i, a.clone())).collect();
+        let wire_w: BTreeMap<u8, Vec<Vec<u8>>> =
+            round2.into_iter().map(|(i, (w, _))| (i, w)).collect();
         // Round 3, and in parallel round 1 of the next execution. Each party gets the others'
         // openings; it already holds its own.
         let (wire_z, _prefetched) = futures_util::future::join(
@@ -598,6 +666,11 @@ impl FlatCoordinator {
                         .iter()
                         .filter(|(i, _)| **i != to)
                         .map(|(i, w)| (*i, w.clone()))
+                        .collect(),
+                    attestations: attestations
+                        .iter()
+                        .filter(|(i, _)| *i != to)
+                        .cloned()
                         .collect(),
                 },
                 |b| {
@@ -831,12 +904,8 @@ pub fn read_party_share(path: &Path) -> std::io::Result<PartyKey> {
         .ok_or_else(|| std::io::Error::other("malformed party share file"))
 }
 
-pub async fn run_party(
-    listener: TcpListener,
-    node: PartyNode,
-    delay: Duration,
-    tls: Arc<TlsIdentity>,
-) {
+pub async fn run_party(listener: TcpListener, node: PartyNode, delay: Duration) {
+    let tls = node.tls.clone();
     serve(listener, Arc::new(node), delay, tls).await
 }
 
@@ -882,15 +951,16 @@ impl LocalCommittee {
                 .find(|(f, _)| *f == id)
                 .map(|(_, m)| *m)
                 .unwrap_or_default();
-            let mut node =
-                PartyNode::new(id, key.clone(), party, fault, Policy::ephemeral(&key.pk));
-            node.mask_ttl = mask_ttl;
-            tasks.push(tokio::spawn(run_party(
-                listener,
-                node,
-                delay,
+            let mut node = PartyNode::new(
+                id,
+                key.clone(),
+                party,
+                fault,
+                Policy::ephemeral(&key.pk),
                 Arc::new(tls.identity(id)?),
-            )));
+            );
+            node.mask_ttl = mask_ttl;
+            tasks.push(tokio::spawn(run_party(listener, node, delay)));
         }
         Ok(Self {
             key,

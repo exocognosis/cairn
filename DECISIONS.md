@@ -532,3 +532,13 @@ numerics acceptable here: every function and the whole pipeline are compared wit
 **D-104. Security argument as a document with a gap list.** `docs/SECURITY_ARGUMENT.md`
 argues each addition separately and ends with what it does not establish. It is written to
 be attacked: the gaps are listed in order so a reviewer starts with the weakest point.
+
+**D-105. Parties sign the commitment set, with their TLS keys.** In round 2 a party returns
+a signature over (session, hash of message, all commitments); in round 3 it answers only if
+every other active party's signature over the same statement verifies under a certificate
+its own table pins for that party. This gives through an untrusted relay the agreement the
+paper takes from its channels. The TLS key was chosen over the DKG identity key because
+every signing node already has it, every peer already pins it, and rotation and revocation
+already work; the price is one key with two uses, separated by a prefix no TLS 1.3 handshake
+signature can carry. The coordinator checks the signatures too, so that a party sending a bad
+one is named instead of the honest parties that refuse because of it. Wire version 3.

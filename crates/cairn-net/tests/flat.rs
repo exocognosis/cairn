@@ -178,7 +178,7 @@ async fn a_party_answers_a_session_once() {
     let session = [9u8; 32];
     let ask = |to: u8, body: Body| {
         let frame = Frame {
-            version: 2,
+            version: cairn_net::wire::NET_VERSION,
             from: NodeId::Coordinator,
             to: NodeId::Party(to),
             session,
@@ -201,17 +201,19 @@ async fn a_party_answers_a_session_once() {
         presign: ids[&p],
         commitments: commitments.clone(),
     };
-    let mut revealed = Vec::new();
+    let (mut revealed, mut attestations) = (Vec::new(), Vec::new());
     for p in [1u8, 2] {
-        let Body::M2Reveal { w } = ask(p, m2(p)).await else {
+        let Body::M2Reveal { w, attestation } = ask(p, m2(p)).await else {
             panic!()
         };
         revealed.push((p - 1, w));
+        attestations.push((p - 1, attestation));
     }
     // The masks left the pool at the first reveal: a second reveal request gets nothing.
     assert!(matches!(ask(2, m2(2)).await, Body::Refused { .. }));
     let m3 = || Body::M3 {
         revealed: revealed.clone(),
+        attestations: attestations.clone(),
     };
     // Each party answers its session once...
     assert!(matches!(ask(1, m3()).await, Body::M3Response { .. }));
@@ -234,7 +236,7 @@ async fn unused_masks_expire() {
     );
     let ask = |session: u8, body: Body| {
         let frame = Frame {
-            version: 2,
+            version: cairn_net::wire::NET_VERSION,
             from: NodeId::Coordinator,
             to: NodeId::Party(1),
             session: [session; 32],
@@ -265,4 +267,113 @@ async fn unused_masks_expire() {
         ask(2, m2(id, commitment)).await,
         Body::Refused { .. }
     ));
+}
+
+/// A coordinator that shows two parties different commitment sets gets no response: each
+/// party answers only if every other active party signed the set it was shown itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_party_refuses_when_another_was_shown_a_different_commitment_set() {
+    let (committee, _) = committee(2, 3, &[]).await;
+    let link = Link::new(
+        TIMEOUT,
+        Duration::ZERO,
+        committee.identity(NodeId::Coordinator),
+    );
+    let ask = |session: [u8; 32], to: u8, body: Body| {
+        let frame = Frame {
+            version: cairn_net::wire::NET_VERSION,
+            from: NodeId::Coordinator,
+            to: NodeId::Party(to),
+            session,
+            body,
+        };
+        let (addr, link) = (committee.peers[&NodeId::Party(to)].clone(), link.clone());
+        async move { call(&addr, &link, &frame).await.unwrap().reply.body }
+    };
+    let message = checkpoint(&committee.key.pk, 100, "equivocation");
+    // Round 2 of one session, with whatever commitment sets the caller chooses per party.
+    let round2 = |session: [u8; 32], tamper: bool, other_message: bool| {
+        let (ask, message) = (&ask, message.clone());
+        let pk = committee.key.pk;
+        async move {
+            let mut commitments = Vec::new();
+            let mut ids = std::collections::BTreeMap::new();
+            for p in [1u8, 2] {
+                let Body::PresignCommit { id, commitment } = ask(session, p, Body::Presign).await
+                else {
+                    panic!()
+                };
+                commitments.push((p - 1, commitment));
+                ids.insert(p, id);
+            }
+            let mut out = Vec::new();
+            for p in [1u8, 2] {
+                // Party 2 is shown a different commitment for party 1, or a different message.
+                let mut shown = commitments.clone();
+                let mut text = message.clone();
+                if p == 2 && tamper {
+                    shown[0].1[0] ^= 1;
+                }
+                if p == 2 && other_message {
+                    text = checkpoint(&pk, 101, "another block");
+                }
+                let body = Body::M2 {
+                    message: text,
+                    presign: ids[&p],
+                    commitments: shown,
+                };
+                let Body::M2Reveal { w, attestation } = ask(session, p, body).await else {
+                    panic!("party {p} did not reveal")
+                };
+                out.push((p - 1, w, attestation));
+            }
+            out
+        }
+    };
+    let m3_to_party_1 = |session, replies: &[(u8, Vec<Vec<u8>>, cairn_net::wire::Attestation)]| {
+        ask(
+            session,
+            1,
+            Body::M3 {
+                revealed: vec![(1, replies[1].1.clone())],
+                attestations: vec![(1, replies[1].2.clone())],
+            },
+        )
+    };
+    let refused =
+        |body: Body| matches!(body, Body::Refused { reason } if reason.contains("did not sign"));
+
+    // Honest relay: party 1 answers.
+    let honest = round2([1; 32], false, false).await;
+    assert!(matches!(
+        m3_to_party_1([1; 32], &honest).await,
+        Body::M3Response { .. }
+    ));
+    // Party 2 was shown a different commitment set: its signature covers that set, not the
+    // one party 1 signed, so party 1 refuses.
+    let split = round2([2; 32], true, false).await;
+    assert!(refused(m3_to_party_1([2; 32], &split).await));
+    // A signature from another session does not carry over.
+    let fresh = round2([4; 32], false, false).await;
+    let mut replayed = fresh.clone();
+    replayed[1].2 = honest[1].2.clone();
+    assert!(refused(m3_to_party_1([4; 32], &replayed).await));
+    // No signature at all.
+    let fresh = round2([5; 32], false, false).await;
+    let body = Body::M3 {
+        revealed: vec![(1, fresh[1].1.clone())],
+        attestations: Vec::new(),
+    };
+    assert!(refused(ask([5; 32], 1, body).await));
+    // Party 2's signature presented as party 1's own does not count for party 2's slot.
+    let fresh = round2([6; 32], false, false).await;
+    let body = Body::M3 {
+        revealed: vec![(1, fresh[1].1.clone())],
+        attestations: vec![(1, fresh[0].2.clone())],
+    };
+    assert!(refused(ask([6; 32], 1, body).await));
+    // Same commitments, but party 2 was asked to sign a different checkpoint (the next
+    // height, so that its own policy lets it through).
+    let split = round2([3; 32], false, true).await;
+    assert!(refused(m3_to_party_1([3; 32], &split).await));
 }
