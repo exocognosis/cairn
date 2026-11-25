@@ -24,7 +24,7 @@ builder's own list, not an audit; a reviewer will add to it. Status as of 2026-1
 | 10 | The coordinator is a single point of failure for availability (not for secrecy). | Open. |
 | 11 | Latency on real links: 3-of-4 took 3.9 s between a home connection and Helsinki, against a 2 to 3 s target. One link measured. | Partly. Masks are now precomputed; data volume remains. |
 | 12 | Cost grows steeply with the threshold; practical committees are 2-of-3 to 3-of-5. | Inherent to the scheme's parameters. |
-| 13 | No metrics, alerting, backup procedure, upgrade path or packaged release. | Partly. Parties and the coordinator write audit logs. The KMS endpoint serves Prometheus counters and a liveness check (`--metrics-listen`): requests, refused signatures, signatures, failures, cache hits, signing time, time of last signature. A release workflow builds binaries with checksums for Linux x86-64, Linux arm64 and macOS arm64 when a version tag is pushed; it has not run yet. Still missing: per-party metrics, alert rules, a backup procedure beyond share recovery, an upgrade path. |
+| 13 | No metrics, alerting, backup procedure, upgrade path or packaged release. | Partly. Parties and the coordinator write audit logs. The KMS endpoint serves Prometheus counters and a liveness check (`--metrics-listen`): requests, refused signatures, signatures, failures, cache hits, signing time, time of last signature. A release workflow builds binaries with checksums for Linux x86-64, Linux arm64 and macOS arm64 when a version tag is pushed; v0.3.0 was published this way. Still missing: per-party metrics, alert rules, a backup procedure beyond share recovery, an upgrade path. |
 | 14 | Never run against a real chain; every live run used a CometBFT stand-in. | Partly. `scripts/real-chain-demo.sh`: an unmodified pqc-sidecar followed Cosmos Hub mainnet through a public RPC in light-client mode and a local 3-of-4 committee signed blocks 34,035,530 and 34,035,540. Not done: operators on separate hosts, long-running operation, a chain that consumes the certificates. |
 
 ## Only others can provide
@@ -41,5 +41,5 @@ builder's own list, not an audit; a reviewer will add to it. Status as of 2026-1
 2. ~~Distributed key generation from the paper's appendix (item 4).~~ Done; attribution from per-subset keys remains (item 9).
 3. An exact sampler and the rest of constant-time (items 2, 3). Reduction is done; sampling matches the reference; a bound on the floating-point error is the open part.
 4. Share refresh and party replacement (item 5). Recovery of a lost share is done. Refresh is open: the paper does not give one for its short shares; this needs design work, not just code.
-5. ~~TLS on the KMS hop, metrics, packaged releases (items 7, 13).~~ Done, except that no release has been cut with the new workflow.
+5. ~~TLS on the KMS hop, metrics, packaged releases (items 7, 13).~~ Done; v0.3.0 is the first release built by the workflow.
 6. Operators on separate hosts following a real chain for days (item 14).
