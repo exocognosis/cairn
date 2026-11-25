@@ -266,3 +266,12 @@ persisted protection against conflicting or older checkpoints; audit logs.
 through the coordinator with end-to-end encrypted seeds. A committee of separate processes
 generates its key and signs with it in the tests, and `scripts/run_local_committee.sh` uses it
 by default. Remaining trust in setup: exchanging identity public keys, and the TLS authority.
+
+## Update: attribution, arithmetic, mask lifetimes, and a real chain
+
+Wrong responses are now attributed from public values; modular reduction is branch-free; unused
+masks expire. And for the first time the system signed real blocks: an unmodified pqc-sidecar
+followed Cosmos Hub mainnet through a public RPC endpoint in light-client mode, and a 3-of-4
+committee whose key was generated without a dealer signed heights 34,035,530 and 34,035,540,
+with the KMS endpoint requiring signed requests and every party restricted to that chain.
+[BLOCKERS.md](BLOCKERS.md) has the current status of every item.

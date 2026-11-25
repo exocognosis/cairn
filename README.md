@@ -40,10 +40,11 @@ Each line is a test or a recorded run in this repository.
 | **It runs as separate machines.** 16 signer processes, 4 root engines and an MPC backend over mutually authenticated TLS. | Run across a Mac in the US and a server in Helsinki, 178 ms apart. |
 | **A real MPC does the secret computation.** | MP-SPDZ, three parties, 103 signing attempts on Linux with no failure. |
 | **A stock checkpoint daemon uses it unchanged.** | An unmodified `pqc-sidecar` signs live checkpoints through cairn by configuration alone. |
+| **It has signed a real chain's blocks.** | An unmodified pqc-sidecar followed Cosmos Hub mainnet in light-client mode and a 3-of-4 committee with a jointly generated key signed two checkpoints (`scripts/real-chain-demo.sh`). |
 | **Faults do not stall it.** Offline, stalled and misbehaving nodes are skipped or named and replaced. | Network tests with wall-clock deadlines. |
 | **Measured cost.** About 21 s per checkpoint across two hosts with real MPC; 0.12 s on one machine with a stand-in backend. | [Benchmarks](#benchmarks). |
 
-51 automated tests; `clippy` clean.
+74 automated tests; `clippy` clean.
 
 ## What it is not, yet
 
@@ -107,6 +108,8 @@ cargo run --release -p cairn-sidecar -- mithril-demo --threshold 3 --parties 4
 
 The committee generates its own key: `cairn dkg` runs the paper's distributed key generation,
 so no machine ever holds the whole key (the local script uses it by default).
+
+A party that sends a wrong response is identified from public values and excluded.
 
 Safeguards an operator gets today: every party checks the checkpoint itself and will not sign
 for another key, an unlisted chain, a lower height, or a second checkpoint at one height (kept

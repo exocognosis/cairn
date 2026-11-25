@@ -435,3 +435,21 @@ resharing or refresh yet.
 **D-86. The paper's share partition tables.** `RSSRecover` now uses the balanced assignments
 of the paper's Algorithm 6, relabelled for the active set, instead of a greedy balance. All
 fifteen committee shapes are checked to cover every secret exactly once.
+
+**D-87. Responses are publicly checkable.** With the per-subset public keys from key generation,
+the half of a party's response that it does not send can be recomputed by anyone, and the
+party's own acceptance test re-run with a small allowance for rounding. A wrong response fails
+by a wide margin. This replaces rotation with attribution for keys that carry those values.
+
+**D-88. Barrett reduction with masks.** `red` no longer divides or branches on its input.
+This is a source-level property only; the remaining variable-time code (mask sampling with
+`f64` functions, secret expansion) is listed in docs/BLOCKERS.md.
+
+**D-89. Masks and open sessions expire.** 120 s by default at the party; the coordinator stops
+using a prefetched commitment after 60 s. Cost: at checkpoint cadences slower than that, each
+request pays round 1 again instead of using a prefetched one.
+
+**D-90. A real chain through a public endpoint.** The first run against real blocks uses a
+public Cosmos Hub RPC with pqc-sidecar's light-client verification, which checks validator
+signatures itself, so the endpoint is not trusted for finality. The committee still runs on
+one machine.
