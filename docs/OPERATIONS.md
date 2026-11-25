@@ -78,8 +78,19 @@ is gone.
    `cairn tls-rotate --tls <dir> --id coordinator`.
 2. Every party operator: `cairn tls-pin --tls <dir> --id coordinator --fingerprint <new>`.
 3. Run `cairn serve-kms` on the standby with the same SigV4 credentials.
-4. Failover is the sidecar's endpoint URL: a DNS name or a TCP load balancer in front of both.
-   This step is not automated or tested here.
+4. On the sidecar's machine, run the relay and point the sidecar's `aws_endpoint_url` at it:
+
+   ```bash
+   cairn kms-failover --listen 127.0.0.1:8200 --backends coordinator-a:8200,coordinator-b:8200
+   ```
+
+   Each connection goes to the first coordinator that accepts it, starting with the one that
+   last worked. The relay carries bytes only: with HTTPS on the endpoint, give both
+   coordinators the same `kms-cert` certificate. Tested with an unmodified pqc-sidecar by
+   `scripts/failover-check.sh`, which kills each coordinator in turn.
+5. The relay switches when a coordinator stops accepting connections. A coordinator that is
+   running but cannot reach the parties is not detected: the `CairnSigningFailing` alert is
+   what tells you, and stopping that coordinator is the fix.
 
 Both may be up at once. The parties, not the coordinators, enforce one checkpoint per height.
 
@@ -89,9 +100,11 @@ Both may be up at once. The parties, not the coordinators, enforce one checkpoin
 - Party: `cairn node --role party ... --metrics-listen <addr:port>`.
 - Both serve `/metrics` (Prometheus text) and `/healthz`, unauthenticated: bind them to a
   private address.
-- Alert rules: [`deploy/prometheus-alerts.yml`](../deploy/prometheus-alerts.yml). The rules
-  are written against the metric names in the code and have not been run in a Prometheus
-  server.
+- Alert rules: [`deploy/prometheus-alerts.yml`](../deploy/prometheus-alerts.yml), with unit
+  tests beside it. `scripts/alerts-check.sh` runs promtool on both and then has a real
+  Prometheus scrape a live local committee and evaluate every rule. Set the number in
+  `CairnTooFewParties` to your threshold. Delivery through an Alertmanager is yours to set up
+  and has not been tried here.
 
 ## Upgrading
 
@@ -107,7 +120,16 @@ Both may be up at once. The parties, not the coordinators, enforce one checkpoin
 - There is no compatibility promise for share, committee or policy-state files between
   versions yet, and no migration tool. Keep the cold backup and the old binary until the
   upgraded committee has signed.
-- Rolling upgrades have not been rehearsed across two real releases.
+- `scripts/upgrade-rehearsal.sh` rehearses exactly this on one machine, from a published
+  release to the current build: v0.3.0 to v0.4.0-and-later kept signing at every step, on the
+  files v0.3.0 wrote. An upgrade across a wire-version change has not been rehearsed.
+
+## Latency
+
+`cairn serve-kms --parallel-attempts <k>` (default 2) runs k executions of the protocol side
+by side for each signature and returns the first that succeeds. About half of all executions
+end without a signature, so this saves round trips at the cost of bytes and party CPU. Use 1
+on links where bandwidth, not round-trip time, is the limit.
 
 ## Suspected share leak
 

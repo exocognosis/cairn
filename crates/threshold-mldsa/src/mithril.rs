@@ -17,6 +17,7 @@
 //! standard signatures at the published parameters and what it costs; it is not a secure
 //! implementation.
 
+use crate::dd::Dd;
 use crate::fips204::{
     self, centered, challenge_mul, decompose, expand_a, high_bits, hint_weight, inf_norm,
     mat_vec_coeff, message_representative, red, sample_in_ball, shake256, vec_add, vec_sub,
@@ -450,24 +451,53 @@ pub fn recover_partition(params: &Params, active: &[u8]) -> Option<BTreeMap<u8, 
     )
 }
 
-/// Uniform point in the ball of radius `radius` in `DIM` dimensions (`DIM + 2` Gaussians,
-/// normalized, two dropped).
-fn sample_ball<R: Rng + CryptoRng>(radius: f64, rng: &mut R) -> Vec<f64> {
-    let mut g: Vec<f64> = (0..DIM + 2)
-        .map(|_| {
-            let (u1, u2): (f64, f64) = (rng.gen_range(f64::MIN_POSITIVE..1.0), rng.gen());
-            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
-        })
-        .collect();
-    let norm = g.iter().map(|x| x * x).sum::<f64>().sqrt();
+/// Pairs of uniforms one mask consumes: each gives two Gaussians.
+pub(crate) const PAIRS: usize = (DIM + 2) / 2;
+
+/// A point in the ball of radius `radius` in `DIM` dimensions from [`PAIRS`] pairs of
+/// uniforms (the first in `(0, 1)`, the second in `[0, 1)`): two independent Box-Muller
+/// Gaussians per pair (the cosine and the sine), `DIM + 2` in all, normalized, two dropped.
+/// All in double-double arithmetic, about 106 bits, with elementary functions written as
+/// fixed operation sequences (see `dd.rs`). Deterministic, so the `sampler_precision` test
+/// can run the same uniforms through 256-bit arithmetic.
+pub(crate) fn ball_from_uniforms(radius: f64, uniforms: &[(Dd, Dd)]) -> Vec<Dd> {
+    debug_assert_eq!(uniforms.len(), PAIRS);
+    let mut g: Vec<Dd> = Vec::with_capacity(DIM + 2);
+    for &(u1, u2) in uniforms {
+        let radial = u1.ln().mul_f64(-2.0).sqrt();
+        let (cos, sin) = u2.cos_sin_turn();
+        g.push(radial.mul(cos));
+        g.push(radial.mul(sin));
+    }
+    let norm = g.iter().fold(Dd::ZERO, |sum, x| sum.add(x.mul(*x))).sqrt();
+    let scale = Dd(radius, 0.0).div(norm);
     g.truncate(DIM);
-    g.iter_mut().for_each(|x| *x *= radius / norm);
+    g.iter_mut().for_each(|x| *x = x.mul(scale));
     g
+}
+
+/// Two uniforms of 106 random bits each: the first on the odd multiples of 2^-107, so never
+/// 0 or 1 (its logarithm is taken), the second on the multiples of 2^-106 in `[0, 1)`.
+fn uniform_pair<R: Rng + CryptoRng>(rng: &mut R) -> (Dd, Dd) {
+    const STEP: f64 = 1.0 / (1u64 << 53) as f64;
+    let mut bits = || (rng.next_u64() >> 11) as f64;
+    let (a1, b1, a2, b2) = (bits(), bits(), bits(), bits());
+    (
+        Dd::from_sum(a1 * STEP, (2.0 * b1 + 1.0) * (STEP * STEP * 0.5)),
+        Dd::from_sum(a2 * STEP, b2 * (STEP * STEP)),
+    )
+}
+
+/// Uniform point in the ball of radius `radius` in `DIM` dimensions.
+#[cfg(test)]
+fn sample_ball<R: Rng + CryptoRng>(radius: f64, rng: &mut R) -> Vec<Dd> {
+    let uniforms: Vec<(Dd, Dd)> = (0..PAIRS).map(|_| uniform_pair(rng)).collect();
+    ball_from_uniforms(radius, &uniforms)
 }
 
 /// One repetition's secret state for a party.
 struct Mask {
-    x: Vec<f64>,
+    x: Vec<Dd>,
     r1: PolyVec,
     w: PolyVec,
 }
@@ -498,20 +528,29 @@ fn commitment(pk: &[u8], index: u8, w: &[PolyVec]) -> [u8; 32] {
 impl PartyKey {
     /// Round 1: sample `K` masks, compute `w = A r1 + r2` for each, publish a commitment.
     pub fn round1<R: Rng + CryptoRng>(&self, key: &GroupKey, rng: &mut R) -> (Round1, [u8; 32]) {
-        let masks: Vec<Mask> = (0..key.params.reps)
-            .map(|_| {
-                let x = sample_ball(key.params.r_prime, rng);
-                let round = |v: f64| red(v.round() as i64);
-                let r1: PolyVec = (0..L)
-                    .map(|i| std::array::from_fn(|j| round(NU * x[i * N + j])))
-                    .collect();
-                let r2: PolyVec = (0..K)
-                    .map(|i| std::array::from_fn(|j| round(x[(L + i) * N + j])))
-                    .collect();
-                let w = vec_add(&mat_vec_coeff(&key.a_hat, &r1), &r2);
-                Mask { x, r1, w }
-            })
+        // Draw all the randomness here, then do the arithmetic for each repetition on its own
+        // thread: the double-double sampler is the expensive part of a signature.
+        let uniforms: Vec<Vec<(Dd, Dd)>> = (0..key.params.reps)
+            .map(|_| (0..PAIRS).map(|_| uniform_pair(rng)).collect())
             .collect();
+        let mask = |uniforms: &[(Dd, Dd)]| {
+            let x = ball_from_uniforms(key.params.r_prime, uniforms);
+            let r1: PolyVec = (0..L)
+                .map(|i| std::array::from_fn(|j| red(x[i * N + j].mul_f64(NU).round())))
+                .collect();
+            let r2: PolyVec = (0..K)
+                .map(|i| std::array::from_fn(|j| red(x[(L + i) * N + j].round())))
+                .collect();
+            let w = vec_add(&mat_vec_coeff(&key.a_hat, &r1), &r2);
+            Mask { x, r1, w }
+        };
+        let masks: Vec<Mask> = std::thread::scope(|scope| {
+            let running: Vec<_> = uniforms.iter().map(|u| scope.spawn(|| mask(u))).collect();
+            running
+                .into_iter()
+                .map(|thread| thread.join().expect("mask thread"))
+                .collect()
+        });
         let ws: Vec<PolyVec> = masks.iter().map(|m| m.w.clone()).collect();
         let cmt = commitment(&key.pk, self.index, &ws);
         (
@@ -548,7 +587,8 @@ impl PartyKey {
             s2 = vec_add(&s2, b);
         }
         let mu = message_representative(&key.tr, &[], message);
-        let r_sq = key.params.r * key.params.r;
+        // nu^2 r^2: an integer below 2^53, so exact.
+        let limit = NU * NU * key.params.r * key.params.r;
         let out = state
             .masks
             .iter()
@@ -558,16 +598,21 @@ impl PartyKey {
                 let (v1, v2) = (challenge_mul(&c, &s1), challenge_mul(&c, &s2));
                 // Imbalanced hyperball rejection (the paper's HRej): accept iff
                 // || (v1 / nu, v2) + x ||_2 <= r.
-                let mut norm_sq = 0.0;
+                // |(v1/nu + x1, v2 + x2)|^2 <= r^2, multiplied through by nu^2 so that every
+                // factor is an integer, and summed in double-double like the mask itself: a
+                // double's rounding error would decide borderline cases.
+                let (mut first, mut second) = (Dd::ZERO, Dd::ZERO);
                 for (i, coeff) in v1.iter().flatten().enumerate() {
-                    let z = centered(*coeff) as f64 / NU + mask.x[i];
-                    norm_sq += z * z;
+                    let z = mask.x[i].mul_f64(NU).add(Dd(centered(*coeff) as f64, 0.0));
+                    first = first.add(z.mul(z));
                 }
                 for (i, coeff) in v2.iter().flatten().enumerate() {
-                    let z = centered(*coeff) as f64 + mask.x[L * N + i];
-                    norm_sq += z * z;
+                    let z = mask.x[L * N + i].add(Dd(centered(*coeff) as f64, 0.0));
+                    second = second.add(z.mul(z));
                 }
-                (norm_sq <= r_sq).then(|| vec_add(&v1, &mask.r1))
+                let norm_sq = first.add(second.mul_f64(NU * NU));
+                let inside = norm_sq.0 < limit || (norm_sq.0 == limit && norm_sq.1 <= 0.0);
+                inside.then(|| vec_add(&v1, &mask.r1))
             })
             .collect();
         debug_assert_eq!(state.index, self.index);
@@ -789,6 +834,10 @@ pub fn sign_local<R: Rng + CryptoRng>(
 mod interop;
 
 #[cfg(test)]
+#[path = "sampler_precision.rs"]
+mod sampler_precision;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
@@ -861,7 +910,7 @@ mod tests {
         let (r, runs) = (500_000.0f64, 300);
         let mut sum = 0.0;
         for _ in 0..runs {
-            let x = sample_ball(r, &mut OsRng);
+            let x: Vec<f64> = sample_ball(r, &mut OsRng).iter().map(|c| c.0).collect();
             let norm = x.iter().map(|v| v * v).sum::<f64>().sqrt();
             assert!(norm <= r);
             sum += (norm / r).powi(DIM as i32);

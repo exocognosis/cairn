@@ -504,3 +504,31 @@ is tested. Switching the sidecar between them is left to DNS or a load balancer.
 
 **D-99. Frames of another wire version are dropped.** Mixed versions fail closed instead of
 misparsing.
+
+**D-100. Failover is a byte relay beside the sidecar.** `cairn kms-failover` forwards each
+connection to the first coordinator that accepts it. It terminates nothing and holds no key,
+so it adds no party to trust, and beside the sidecar it fails only when the sidecar's machine
+does. Health is "accepts a connection"; a coordinator that is up and unable to sign is left
+to alerting, because deciding that from outside would mean parsing requests.
+
+**D-101. Attempts side by side.** The coordinator may run several executions for one message
+at once and keep the first signature (`parallel_attempts`, default 2 in `serve-kms`, 1 in the
+library). A corrupt coordinator could always open concurrent sessions, so this exposes
+nothing new; it costs bytes and party CPU. Measured with injected delay only.
+
+**D-102. Double-double sampler with its own elementary functions.** The mask sampler and the
+rejection test moved from `f64` and the system `ln`/`cos` to double-double arithmetic with
+fixed-sequence `ln` and `cos` and no fused multiply-add. Reasons: the estimated distance
+from the ideal distribution drops from about 2^-18 to about 2^-73 per mask, and the system
+functions choose their path by the argument, which here decides a secret. Cost: a mask takes
+about 2.5 ms of CPU; repetitions are computed on parallel threads. cairn no longer samples
+exactly as the reference does, which interoperation does not need: each party samples its
+own masks.
+
+**D-103. A 256-bit reference in the tests.** `astro-float` is a dev-dependency used to run
+the sampler's formula at 256 bits on the same uniforms. It is what makes hand-written
+numerics acceptable here: every function and the whole pipeline are compared with it.
+
+**D-104. Security argument as a document with a gap list.** `docs/SECURITY_ARGUMENT.md`
+argues each addition separately and ends with what it does not establish. It is written to
+be attacked: the gaps are listed in order so a reviewer starts with the weakest point.

@@ -45,6 +45,10 @@ pub struct NetPolicy {
     pub reinstate_every: u64,
     /// Record the kind of every frame the coordinator receives.
     pub record: bool,
+    /// Three-round committee only: how many independent executions to run at once for one
+    /// signature. About half of all executions end without a signature, so running two side
+    /// by side trades bytes for round trips. 1 runs them one after another.
+    pub parallel_attempts: usize,
 }
 
 impl Default for NetPolicy {
@@ -57,6 +61,7 @@ impl Default for NetPolicy {
             max_retries: 16,
             reinstate_every: 16,
             record: false,
+            parallel_attempts: 1,
         }
     }
 }

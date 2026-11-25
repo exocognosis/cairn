@@ -1,0 +1,197 @@
+# Unit tests for prometheus-alerts.yml: `promtool test rules deploy/prometheus-alerts.test.yml`
+# (run by scripts/alerts-check.sh). One group per alert shows it fires; the last shows a
+# healthy committee raises nothing.
+rule_files:
+  - prometheus-alerts.yml
+evaluation_interval: 1m
+tests:
+  # endpoint down
+  - interval: 1m
+    input_series:
+      - series: 'up{job="cairn-kms", instance="kms"}'
+        values: '0x10'
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="CairnEndpointDown", alertstate="firing"})
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # failures
+  - interval: 1m
+    input_series:
+      - series: 'cairn_kms_sign_failures_total{job="cairn-kms", instance="kms"}'
+        values: '0+1x20'
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="CairnSigningFailing", alertstate="firing"})
+        eval_time: 16m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # no signature for an hour
+  - interval: 1m
+    input_series:
+      - series: 'cairn_kms_last_signature_timestamp_seconds{job="cairn-kms", instance="kms"}'
+        values: '1x130'
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="CairnNoSignatureLately", alertstate="firing"})
+        eval_time: 2h
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # bad credentials
+  - interval: 1m
+    input_series:
+      - series: 'cairn_kms_rejected_auth_total{job="cairn-kms", instance="kms"}'
+        values: '0+1x20'
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="CairnUnauthenticatedRequests", alertstate="firing"})
+        eval_time: 16m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # slow
+  - interval: 1m
+    input_series:
+      - series: 'cairn_kms_sign_seconds_total{job="cairn-kms", instance="kms"}'
+        values: '0+60x80'
+      - series: 'cairn_kms_signatures_total{job="cairn-kms", instance="kms"}'
+        values: '0+1x80'
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="CairnSlowSignatures", alertstate="firing"})
+        eval_time: 70m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # party down
+  - interval: 1m
+    input_series:
+      - series: 'up{job="cairn-party", instance="p1"}'
+        values: '0x10'
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="CairnPartyDown", alertstate="firing"})
+        eval_time: 7m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # below threshold
+  - interval: 1m
+    input_series:
+      - series: 'up{job="cairn-party", instance="p1"}'
+        values: '1x10'
+      - series: 'up{job="cairn-party", instance="p2"}'
+        values: '1x10'
+      - series: 'up{job="cairn-party", instance="p3"}'
+        values: '0x10'
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="CairnTooFewParties", alertstate="firing"})
+        eval_time: 4m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # no party up at all
+  - interval: 1m
+    input_series:
+      - series: 'up{job="cairn-party", instance="p1"}'
+        values: '0x10'
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="CairnTooFewParties", alertstate="firing"})
+        eval_time: 4m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # restart
+  - interval: 1m
+    input_series:
+      - series: 'cairn_party_uptime_seconds{job="cairn-party", instance="p1"}'
+        values: '0+60x3'
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="CairnPartyRestarted", alertstate="firing"})
+        eval_time: 2m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # policy refusal
+  - interval: 1m
+    input_series:
+      - series: 'cairn_party_policy_refused_total{job="cairn-party", instance="p1"}'
+        values: '0 0 0 1 1 1 1'
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="CairnPolicyRefusals", alertstate="firing"})
+        eval_time: 5m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # protocol refusals
+  - interval: 1m
+    input_series:
+      - series: 'cairn_party_refused_total{job="cairn-party", instance="p1"}'
+        values: '0+1x20'
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="CairnProtocolRefusals", alertstate="firing"})
+        eval_time: 16m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # silent party
+  - interval: 1m
+    input_series:
+      - series: 'cairn_party_responses_total{job="cairn-party", instance="p1"}'
+        values: '5x400'
+      - series: 'cairn_kms_signatures_total{job="cairn-kms", instance="kms"}'
+        values: '0+1x400'
+    promql_expr_test:
+      - expr: count(ALERTS{alertname="CairnPartyNotResponding", alertstate="firing"})
+        eval_time: 6h30m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+  # a healthy 3-of-4 committee signing once a minute: nothing fires or is pending
+  - interval: 1m
+    input_series:
+      - series: 'up{job="cairn-kms", instance="kms"}'
+        values: '1x400'
+      - series: 'cairn_kms_sign_failures_total{job="cairn-kms", instance="kms"}'
+        values: '0x400'
+      - series: 'cairn_kms_rejected_auth_total{job="cairn-kms", instance="kms"}'
+        values: '0x400'
+      - series: 'cairn_kms_signatures_total{job="cairn-kms", instance="kms"}'
+        values: '0+1x400'
+      - series: 'cairn_kms_sign_seconds_total{job="cairn-kms", instance="kms"}'
+        values: '0+1x400'
+      - series: 'cairn_kms_last_signature_timestamp_seconds{job="cairn-kms", instance="kms"}'
+        values: '0+60x400'
+      - series: 'cairn_party_policy_refused_total{job="cairn-party", instance="p1"}'
+        values: '0x400'
+      - series: 'cairn_party_refused_total{job="cairn-party", instance="p1"}'
+        values: '0x400'
+      - series: 'up{job="cairn-party", instance="p1"}'
+        values: '1x400'
+      - series: 'cairn_party_uptime_seconds{job="cairn-party", instance="p1"}'
+        values: '1000+60x400'
+      - series: 'cairn_party_responses_total{job="cairn-party", instance="p1"}'
+        values: '0+1x400'
+      - series: 'up{job="cairn-party", instance="p2"}'
+        values: '1x400'
+      - series: 'cairn_party_uptime_seconds{job="cairn-party", instance="p2"}'
+        values: '1000+60x400'
+      - series: 'cairn_party_responses_total{job="cairn-party", instance="p2"}'
+        values: '0+1x400'
+      - series: 'up{job="cairn-party", instance="p3"}'
+        values: '1x400'
+      - series: 'cairn_party_uptime_seconds{job="cairn-party", instance="p3"}'
+        values: '1000+60x400'
+      - series: 'cairn_party_responses_total{job="cairn-party", instance="p3"}'
+        values: '0+1x400'
+      - series: 'up{job="cairn-party", instance="p4"}'
+        values: '1x400'
+      - series: 'cairn_party_uptime_seconds{job="cairn-party", instance="p4"}'
+        values: '1000+60x400'
+      - series: 'cairn_party_responses_total{job="cairn-party", instance="p4"}'
+        values: '0+1x400'
+    promql_expr_test:
+      - expr: count(ALERTS)
+        eval_time: 6h30m
+        exp_samples: []
+      - expr: count(ALERTS)
+        eval_time: 30m
+        exp_samples: []

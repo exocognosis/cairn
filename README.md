@@ -72,16 +72,26 @@ It runs as separate processes over mutual TLS, and a stock pqc-sidecar signs thr
 (`stock_pqc_sidecar_signs_through_a_three_round_committee`). 100 certificates per row, one
 Apple M3, each party its own process, injected round-trip time on every link:
 
-| RTT | committee | latency ms (mean / p50 / p95 / max) | executions (mean) | kB per party per cert |
-|---|---|---|---|---|
-| localhost | 2-of-3 | 28 / 16 / 73 / 182 | 1.85 | 97 |
-| localhost | 3-of-4 | 98 / 94 / 189 / 330 | 2.08 | 615 |
-| localhost | 3-of-5 | 249 / 137 / 556 / 1,214 | 1.83 | 1,634 |
-| 50 ms | 2-of-3 | 265 / 138 / 674 / 1,204 | 1.99 | 105 |
-| 50 ms | 3-of-4 | 350 / 330 / 828 / 1,493 | 2.10 | 619 |
-| 50 ms | 3-of-5 | 532 / 495 / 1,233 / 2,245 | 2.12 | 1,892 |
+| RTT | committee | one execution at a time: latency ms (mean / p50 / p95 / max) | two side by side |
+|---|---|---|---|
+| localhost | 2-of-3 | 42 / 38 / 88 / 174 | 45 / 38 / 89 / 115 |
+| localhost | 3-of-4 | 129 / 118 / 290 / 413 | 181 / 128 / 424 / 635 |
+| localhost | 3-of-5 | 370 / 335 / 1,005 / 1,489 | 466 / 337 / 991 / 1,332 |
+| 50 ms | 2-of-3 | 277 / 277 / 559 / 978 | 207 / 159 / 452 / 517 |
+| 50 ms | 3-of-4 | 407 / 355 / 1,226 / 1,409 | 318 / 231 / 671 / 890 |
+| 50 ms | 3-of-5 | 563 / 561 / 1,127 / 1,405 | 725 / 521 / 1,626 / 3,337 |
+| 180 ms | 2-of-3 | 823 / 791 / 1,992 / 3,149 | 610 / 421 / 1,453 / 2,081 |
+| 180 ms | 3-of-4 | 922 / 906 / 2,265 / 3,647 | 712 / 516 / 1,227 / 2,022 |
+| 180 ms | 3-of-5 | 1,243 / 1,134 / 2,836 / 3,412 | 1,131 / 816 / 2,439 / 3,168 |
 
-Masks are sampled ahead of time, so a signing request costs two round trips per execution.
+Masks are sampled ahead of time, so a signing request costs two round trips per execution,
+and about half of all executions end without a signature (2.0 to 2.3 executions per
+certificate). Running two executions side by side (`serve-kms --parallel-attempts`, default
+2) cuts mean latency by about a quarter for 2-of-3 and 3-of-4 once the link has delay; for
+3-of-5 on this one shared machine it does not help, because the parties' CPU is the limit. A
+certificate moves about 0.1, 0.6 and 1.9 MB per party for the three sizes. These rows use the
+double-double mask sampler ([docs/SAMPLER.md](docs/SAMPLER.md)), which costs 15 to 120 ms
+more than `f64` did here with every party on one laptop.
 
 **Across two real hosts** (one party and the coordinator on a home connection in the US, the
 others in Helsinki, 185 ms apart) it is slower than the injected-delay rows suggest, because
@@ -94,8 +104,8 @@ this protocol moves a lot of data and injected delay does not model that:
 | 3-of-5 | 20 | 6.30 / 6.24 / 11.66 | 1,872 |
 
 A stock pqc-sidecar signed a live checkpoint through the cross-host 3-of-4 committee in about
-3 s. That run predates the precomputed masks, which save one round trip per execution but not
-the data transfer that dominated it. For comparison, the tower design took 21 s on a similar link with real MPC. These numbers
+3 s. That run predates the precomputed masks and side-by-side executions, which save round trips
+but not the data transfer that dominated it; it has not been repeated. For comparison, the tower design took 21 s on a similar link with real MPC. These numbers
 include all of the cryptography; there is nothing left to substitute.
 
 ```bash
@@ -159,6 +169,8 @@ the live sidecar flow and two-host deployment.
 | Why each design choice was made (65 entries) | [DECISIONS.md](DECISIONS.md) |
 | Everything that still blocks production use, with status | [docs/BLOCKERS.md](docs/BLOCKERS.md) |
 | Backup, certificate rotation, standby coordinator, monitoring, upgrades | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
+| Why cairn's additions to the protocol should be safe, and where that argument stops | [docs/SECURITY_ARGUMENT.md](docs/SECURITY_ARGUMENT.md) |
+| How exact and how constant-time the mask sampler is | [docs/SAMPLER.md](docs/SAMPLER.md) |
 | What is planned and what funding would buy | [ROADMAP.md](ROADMAP.md) |
 | The gap to a production BLS replacement, and recent related work | [docs/PRODUCTION_PATH.md](docs/PRODUCTION_PATH.md) |
 | Running it on two machines | [DEPLOY_SPLIT.md](DEPLOY_SPLIT.md) |

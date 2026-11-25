@@ -111,7 +111,7 @@ async fn a_committee_generates_its_key_without_a_dealer_and_then_signs() {
     // Each party's own counters saw the signature being made.
     let responded = stats
         .iter()
-        .filter(|s| s.render().contains("cairn_party_responses_total 1\n"))
+        .filter(|s| !s.render().contains("cairn_party_responses_total 0\n"))
         .count();
     assert!(responded >= 2, "{responded} parties counted a response");
     signing_tasks.iter().for_each(|t| t.abort());

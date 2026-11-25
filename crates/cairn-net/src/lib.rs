@@ -10,6 +10,7 @@
 pub mod cluster;
 pub mod coordinator;
 pub mod dkg;
+pub mod failover;
 pub mod flat;
 pub mod node;
 pub mod policy;

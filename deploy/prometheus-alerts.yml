@@ -46,7 +46,8 @@ groups:
           summary: "Party {{ $labels.instance }} is down. The committee signs while a threshold of parties is up."
       - alert: CairnTooFewParties
         # Set the number to the committee's threshold T.
-        expr: count(up{job="cairn-party"} == 1) < 3
+        # `absent` covers the case where none is up, when `count` returns nothing at all.
+        expr: count(up{job="cairn-party"} == 1) < 3 or absent(up{job="cairn-party"} == 1)
         for: 2m
         labels: { severity: page }
         annotations:

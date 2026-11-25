@@ -78,6 +78,10 @@ Multi-process cluster:
       changing the key. Every secret received is checked against the committee's public keys.
       This does not invalidate a leaked copy of the old share.
   cairn kms-cert --out <dir> [--host <name-or-ip>[,<name-or-ip>...]]
+  cairn kms-failover --listen <addr:port> --backends <addr:port>,<addr:port>[,...]
+                     [--connect-timeout-ms <n>]
+      TCP relay in front of several `serve-kms` coordinators: each connection goes to the
+      first that accepts it. Holds no key. Run it beside the sidecar.
   cairn tls-rotate --tls <dir> --id <node>      (new node certificate, made on this machine)
   cairn tls-pin --tls <dir> --id <node> --fingerprint <hex>
   cairn tls-unpin --tls <dir> --id <node> [--fingerprint <hex>]   (revoke one or all)
@@ -338,6 +342,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     let policy = NetPolicy {
                         round_timeout: Duration::from_millis(ms(args, "--round-timeout-ms", 5000)?),
                         link_delay: Duration::from_millis(ms(args, "--link-delay-ms", 0)?),
+                        parallel_attempts: ms(args, "--parallel-attempts", 2)? as usize,
                         ..NetPolicy::default()
                     };
                     if let Some(path) = &pk_out {
@@ -800,6 +805,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     let policy = NetPolicy {
                         round_timeout: Duration::from_millis(5000),
                         link_delay: Duration::from_millis(rtt / 2),
+                        parallel_attempts: ms(args, "--parallel-attempts", 1)? as usize,
                         ..NetPolicy::default()
                     };
                     let tls = committee.coordinator_tls().map_err(|e| e.to_string())?;
@@ -947,6 +953,33 @@ fn run(args: &[String]) -> Result<(), String> {
             };
             println!("{out}");
             Ok(())
+        }
+        Some("kms-failover") => {
+            let listen = arg(args, "--listen").ok_or("kms-failover needs --listen <addr:port>")?;
+            let backends = arg(args, "--backends")
+                .ok_or("kms-failover needs --backends <addr:port>,<addr:port>")?
+                .split(',')
+                .map(|b| {
+                    use std::net::ToSocketAddrs;
+                    b.to_socket_addrs()
+                        .ok()
+                        .and_then(|mut found| found.next())
+                        .ok_or(format!("--backends: cannot resolve {b}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let timeout = Duration::from_millis(ms(args, "--connect-timeout-ms", 1000)?);
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            runtime.block_on(async {
+                let listener = tokio::net::TcpListener::bind(&listen)
+                    .await
+                    .map_err(|e| format!("bind {listen}: {e}"))?;
+                eprintln!("cairn kms-failover: {listen} -> {backends:?}");
+                cairn_net::failover::relay(listener, backends, timeout).await;
+                Ok(())
+            })
         }
         Some("kms-cert") => {
             use std::os::unix::fs::OpenOptionsExt;

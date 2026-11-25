@@ -519,7 +519,9 @@ impl FlatCoordinator {
             .collect();
         let mut scratch = NetReport::default();
         let guard = Mutex::new(&mut scratch);
-        let _ = self.fetch_presigns(&guard, &active).await;
+        for _ in 0..self.policy.parallel_attempts.max(1) {
+            let _ = self.fetch_presigns(&guard, &active).await;
+        }
     }
 
     /// One protocol execution. `Ok(None)` means it completed but no repetition yielded a
@@ -532,32 +534,38 @@ impl FlatCoordinator {
     ) -> Result<Option<[u8; SIGNATURE_BYTES]>, Vec<NetFault>> {
         let session: [u8; 32] = rand::random();
         // Round 1 normally happened ahead of time; fetch for anyone we have nothing from.
-        let missing: Vec<u8> = {
-            let mut pool = self.presigns.lock().expect("presigns");
-            pool.values_mut()
-                .for_each(|q| q.retain(|(_, _, fetched)| fetched.elapsed() < PRESIGN_MAX_AGE));
-            active
-                .iter()
-                .copied()
-                .filter(|i| !pool.get(i).is_some_and(|q| !q.is_empty()))
-                .collect()
-        };
-        if !missing.is_empty() {
+        // Executions may run side by side, so take one presign per party under a single lock
+        // and fetch again if another execution got there first.
+        let mut fetches = 0;
+        let mine: BTreeMap<u8, ([u8; 32], [u8; 32])> = loop {
+            let missing: Vec<u8> = {
+                let mut pool = self.presigns.lock().expect("presigns");
+                pool.values_mut()
+                    .for_each(|q| q.retain(|(_, _, fetched)| fetched.elapsed() < PRESIGN_MAX_AGE));
+                let missing: Vec<u8> = active
+                    .iter()
+                    .copied()
+                    .filter(|i| !pool.get(i).is_some_and(|q| !q.is_empty()))
+                    .collect();
+                if missing.is_empty() {
+                    break active
+                        .iter()
+                        .filter_map(|i| {
+                            pool.get_mut(i)?.pop_front().map(|(id, c, _)| (*i, (id, c)))
+                        })
+                        .collect();
+                }
+                missing
+            };
+            fetches += 1;
+            if fetches > 4 {
+                return Err(vec![NetFault {
+                    culprit: None,
+                    kind: NetFaultKind::Unattributed("missing presign".into()),
+                }]);
+            }
             self.fetch_presigns(report, &missing).await?;
-        }
-        let mine: BTreeMap<u8, ([u8; 32], [u8; 32])> = {
-            let mut pool = self.presigns.lock().expect("presigns");
-            active
-                .iter()
-                .filter_map(|i| pool.get_mut(i)?.pop_front().map(|(id, c, _)| (*i, (id, c))))
-                .collect()
         };
-        if mine.len() != active.len() {
-            return Err(vec![NetFault {
-                culprit: None,
-                kind: NetFaultKind::Unattributed("missing presign".into()),
-            }]);
-        }
         let commitments: Vec<(u8, [u8; 32])> = mine.iter().map(|(i, (_, c))| (*i, *c)).collect();
         let wire_w = self
             .round_with(
@@ -698,44 +706,66 @@ impl FlatCoordinator {
                 .map(|k| live[(k + rotate) % live.len()])
                 .collect();
             active.sort();
-            let outcome = {
+            // Run the executions side by side and stop at the first signature. The ones still
+            // in flight are dropped; the parties erase their half-finished sessions.
+            let outcomes = {
+                use futures_util::stream::{FuturesUnordered, StreamExt};
                 let guard = Mutex::new(&mut report);
-                self.execute(&guard, &active, message).await
+                let mut running: FuturesUnordered<_> = (0..self.policy.parallel_attempts.max(1))
+                    .map(|_| self.execute(&guard, &active, message))
+                    .collect();
+                let mut outcomes = Vec::new();
+                while let Some(outcome) = running.next().await {
+                    let done = matches!(outcome, Ok(Some(_)));
+                    outcomes.push(outcome);
+                    if done {
+                        break;
+                    }
+                }
+                outcomes
             };
-            match outcome {
-                Ok(Some(signature)) => {
-                    report.elapsed = start.elapsed();
-                    report.signers = active.iter().map(|i| NodeId::Party(i + 1)).collect();
-                    return Ok((signature, report));
-                }
-                // Completed without a signature: the protocol's own retry, not a fault.
-                Ok(None) => {
-                    report.rejections += 1;
-                    if report.rejections > self.policy.max_rejections {
-                        return Err(NetError::RejectionLimit);
-                    }
-                }
-                Err(faults) => {
-                    // A policy refusal is the parties doing their job: report it, exclude nobody.
-                    if let Some(reason) = faults.iter().find_map(|f| match &f.kind {
-                        NetFaultKind::Policy(reason) => Some(reason.clone()),
-                        _ => None,
-                    }) {
-                        return Err(NetError::Policy(reason));
-                    }
-                    for f in &faults {
-                        match f.culprit {
-                            Some(id) => {
-                                self.excluded.insert(id);
-                            }
-                            None => rotate += 1,
+            let mut signature = None;
+            let mut faulted = false;
+            for outcome in outcomes {
+                match outcome {
+                    Ok(Some(found)) => signature = Some(found),
+                    // Completed without a signature: the protocol's own retry, not a fault.
+                    Ok(None) => report.rejections += 1,
+                    Err(faults) => {
+                        // A policy refusal is the parties doing their job: report it, exclude
+                        // nobody.
+                        if let Some(reason) = faults.iter().find_map(|f| match &f.kind {
+                            NetFaultKind::Policy(reason) => Some(reason.clone()),
+                            _ => None,
+                        }) {
+                            return Err(NetError::Policy(reason));
                         }
+                        for f in &faults {
+                            match f.culprit {
+                                Some(id) => {
+                                    self.excluded.insert(id);
+                                }
+                                None if !faulted => rotate += 1,
+                                None => {}
+                            }
+                        }
+                        report.faults.extend(faults);
+                        faulted = true;
                     }
-                    report.faults.extend(faults);
-                    report.retries += 1;
-                    if report.retries > self.policy.max_retries {
-                        return Err(NetError::Stalled(report.faults));
-                    }
+                }
+            }
+            if let Some(signature) = signature {
+                report.elapsed = start.elapsed();
+                report.signers = active.iter().map(|i| NodeId::Party(i + 1)).collect();
+                return Ok((signature, report));
+            }
+            if report.rejections > self.policy.max_rejections {
+                return Err(NetError::RejectionLimit);
+            }
+            if faulted {
+                report.retries += 1;
+                if report.retries > self.policy.max_retries {
+                    return Err(NetError::Stalled(report.faults));
                 }
             }
         }

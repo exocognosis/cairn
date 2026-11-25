@@ -21,4 +21,6 @@ thiserror.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Arbitrary-precision reference for the mask sampler (tests only; pure Rust).
+astro-float = { version = "0.9", default-features = false, features = ["std"] }
 hex.workspace = true
