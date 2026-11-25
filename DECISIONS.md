@@ -453,3 +453,10 @@ request pays round 1 again instead of using a prefetched one.
 public Cosmos Hub RPC with pqc-sidecar's light-client verification, which checks validator
 signatures itself, so the endpoint is not trusted for finality. The committee still runs on
 one machine.
+
+**D-91. Checked against the authors' code instead of waiting for them.** The paper's reference
+implementation is public (https://github.com/Threshold-ML-DSA/Threshold-ML-DSA). Its `thmldsa65/internal` package was read
+against `mithril.rs`: parameters, sampler, rounding, rejection test, sharing tables, challenge
+and combine agree. The one difference (a hint-error norm exactly equal to gamma2) was aligned
+to the reference. The reference was read, not executed or linked; the sharing tables are
+restated as a test. Float sampling is kept because the reference does the same.

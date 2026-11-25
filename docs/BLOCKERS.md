@@ -7,8 +7,8 @@ builder's own list, not an audit; a reviewer will add to it. Status as of 2026-1
 
 | # | Blocker | Status |
 |---|---|---|
-| 1 | The protocol was written from the paper and never compared with the authors' implementation or reviewed by them. A subtle deviation in the rejection step can leak the key over many signatures without any test failing. | Open. Needs the authors or a reviewer. |
-| 2 | Masks are sampled with `f64` arithmetic and a textbook Gaussian method; the security argument assumes an exact distribution. | Open. |
+| 1 | The protocol was written from the paper and never compared with the authors' implementation or reviewed by them. A subtle deviation in the rejection step can leak the key over many signatures without any test failing. | **Mostly done.** Compared line by line with the authors' [reference implementation](https://github.com/Threshold-ML-DSA/Threshold-ML-DSA) (`thmldsa65/internal`). Identical: all fifteen (K, r, r') parameter sets and nu = 6, the hyperball sampler, rounding, the rejection test, the sharing tables and their relabelling (now a test), challenge derivation and the combine checks. One difference found and aligned: the reference rejects a hint-error norm equal to gamma2, cairn accepted it. cairn is stricter in two places (commit-then-reveal of openings, a final standard verification). Not done: a review by the authors, and running both implementations against each other. |
+| 2 | Masks are sampled with `f64` arithmetic and a textbook Gaussian method; the security argument assumes an exact distribution. | Partly. The authors' reference samples the same way (`float64`, Box-Muller, d+2 Gaussians normalised), so cairn is no further from the proof than the reference is. A test now checks the sampler's radial distribution. The gap between floating point and the proof's exact distribution is unquantified in both. |
 | 3 | Arithmetic and the rejection test are not constant time. | Partly. Modular reduction is now division-free and branch-free at the source level. Still variable time: the floating-point functions used to sample masks, and secret expansion during key generation. Nothing is verified at the machine-code level. |
 | 4 | A trusted dealer created the key, every share, the TLS authority and every node's TLS key on one machine. | **Mostly done.** `cairn dkg` implements the paper's distributed key generation: no machine holds the whole key, and seeds travel end-to-end encrypted so the coordinator and TLS authority see only ciphertext. Still open: parties must exchange identity public keys out of band, TLS certificates still come from one authority, and the implementation is as unreviewed as the rest. |
 | 5 | No share refresh, no replacing a party, no certificate rotation or revocation. | Open. |
@@ -37,9 +37,9 @@ builder's own list, not an audit; a reviewer will add to it. Status as of 2026-1
 
 ## What can be done without funding, in order
 
-1. Write to the paper's authors with the repository and specific questions (item 1).
+1. ~~Compare with the authors' implementation (item 1).~~ Done by reading their public code. Writing to them is still worthwhile for the questions the code does not answer (sampler precision, refresh).
 2. ~~Distributed key generation from the paper's appendix (item 4).~~ Done; attribution from per-subset keys remains (item 9).
-3. An exact sampler and the rest of constant-time (items 2, 3). Reduction is done; sampling is the open part and needs the authors' guidance on precision.
+3. An exact sampler and the rest of constant-time (items 2, 3). Reduction is done; sampling matches the reference; a bound on the floating-point error is the open part.
 4. Share refresh and party replacement (item 5). The paper does not give a refresh for its short shares; this needs design work, not just code.
 5. TLS on the KMS hop, metrics, packaged releases (items 7, 13).
 6. Operators on separate hosts following a real chain for days (item 14).

@@ -628,7 +628,9 @@ pub fn combine(
         let hint: Hint = (0..K)
             .map(|i| std::array::from_fn(|j| decompose(approx[i][j]).0 != decompose(w[i][j]).0))
             .collect();
-        if inf_norm(&z1) >= GAMMA1 - BETA || inf_norm(&delta) > GAMMA2 || hint_weight(&hint) > OMEGA
+        if inf_norm(&z1) >= GAMMA1 - BETA
+            || inf_norm(&delta) >= GAMMA2
+            || hint_weight(&hint) > OMEGA
         {
             continue;
         }
@@ -781,6 +783,83 @@ pub fn sign_local<R: Rng + CryptoRng>(
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
+
+    /// The sharing patterns hard-coded in the authors' reference implementation
+    /// (`recoverShare` in thmldsa65/internal/dilithium.go), as bitmasks over party indices.
+    /// Same tables and same relabelling means a party uses the same subset secrets there
+    /// and here for any active set.
+    #[test]
+    fn partition_tables_match_reference_implementation() {
+        let reference: &[(usize, usize, &[&[u8]])] = &[
+            (2, 3, &[&[3, 5], &[6]]),
+            (2, 4, &[&[11, 13], &[7, 14]]),
+            (3, 4, &[&[3, 9], &[6, 10], &[12, 5]]),
+            (2, 5, &[&[27, 29, 23], &[30, 15]]),
+            (3, 5, &[&[25, 11, 19, 13], &[7, 14, 22, 26], &[28, 21]]),
+            (4, 5, &[&[3, 9, 17], &[6, 10, 18], &[12, 5, 20], &[24]]),
+            (2, 6, &[&[61, 47, 55], &[62, 31, 59]]),
+            (
+                3,
+                6,
+                &[
+                    &[27, 23, 43, 57, 39],
+                    &[51, 58, 46, 30, 54],
+                    &[45, 53, 29, 15, 60],
+                ],
+            ),
+            (
+                4,
+                6,
+                &[
+                    &[19, 13, 35, 7, 49],
+                    &[42, 26, 38, 50, 22],
+                    &[52, 21, 44, 28, 37],
+                    &[25, 11, 14, 56, 41],
+                ],
+            ),
+            (
+                5,
+                6,
+                &[
+                    &[3, 5, 33],
+                    &[6, 10, 34],
+                    &[12, 20, 36],
+                    &[9, 24, 40],
+                    &[48, 17, 18],
+                ],
+            ),
+        ];
+        for (t, n, masks) in reference {
+            let ours = ideal_sharing(*t, *n).unwrap();
+            assert_eq!(ours.len(), masks.len(), "{t}-of-{n}");
+            for (row, want) in ours.iter().zip(masks.iter()) {
+                let mut got: Vec<u8> = row
+                    .iter()
+                    .map(|d| d.bytes().fold(0u8, |m, b| m | 1 << (b - b'0')))
+                    .collect();
+                let mut want = want.to_vec();
+                got.sort();
+                want.sort();
+                assert_eq!(got, want, "{t}-of-{n}");
+            }
+        }
+    }
+
+    /// A uniform point in a d-ball of radius r has (|x|/r)^d uniform on [0,1]. Checks the
+    /// "d+2 Gaussians, drop two" sampler against that, and that no sample leaves the ball.
+    #[test]
+    fn ball_sampler_is_uniform_in_radius() {
+        let (r, runs) = (500_000.0f64, 300);
+        let mut sum = 0.0;
+        for _ in 0..runs {
+            let x = sample_ball(r, &mut OsRng);
+            let norm = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+            assert!(norm <= r);
+            sum += (norm / r).powi(DIM as i32);
+        }
+        let mean = sum / runs as f64;
+        assert!((mean - 0.5).abs() < 0.1, "mean {mean}");
+    }
 
     #[test]
     fn partitions_cover_every_secret_exactly_once() {
