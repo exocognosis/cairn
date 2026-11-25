@@ -52,7 +52,7 @@ checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
 
 [[package]]
 name = "cairn-net"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "futures-util",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-sidecar"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "bincode",
@@ -98,7 +98,7 @@ dependencies = [
 
 [[package]]
 name = "cascade-tower"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rand",
  "sha3",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-bridge"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "cascade-tower",
  "rand",
@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "threshold-mldsa"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bincode",
  "hex",
