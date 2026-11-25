@@ -36,3 +36,25 @@ AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local AWS_EC2_METADATA_DISABLED=tr
   --public-key-out "$WORK/public_key.hex"
 cmp "$WORK/public_key.hex" "$WORK/tower_public_key.hex"
 echo "OK: unmodified pqc-sidecar read the tower public key through its aws_kms backend"
+
+# Same call over HTTPS with signed requests: the sidecar trusts the endpoint's certificate
+# through SSL_CERT_FILE and is refused without it.
+kill $KMS 2>/dev/null || true
+TLS_PORT=$((PORT + 1))
+rm -f "$WORK/tower_public_key.hex" "$WORK/public_key.hex"
+target/release/cairn kms-cert --out "$WORK/tls" >/dev/null
+CAIRN_KMS_SECRET_ACCESS_KEY=interop-secret target/release/cairn serve-kms \
+  --listen "127.0.0.1:$TLS_PORT" --public-key-out "$WORK/tower_public_key.hex" \
+  --access-key-id AKIACAIRNINTEROP --tls-cert "$WORK/tls/kms.pem" --tls-key "$WORK/tls/kms.key" &
+KMS=$!
+for _ in $(seq 50); do [ -s "$WORK/tower_public_key.hex" ] && break; sleep 0.1; done
+sed -i.bak "s#http://127.0.0.1:$PORT#https://localhost:$TLS_PORT#" "$WORK/config.toml"
+sidecar() {
+  AWS_ACCESS_KEY_ID=AKIACAIRNINTEROP AWS_SECRET_ACCESS_KEY=interop-secret AWS_EC2_METADATA_DISABLED=true \
+    "$@" target/pqc-sidecar/release/pqc-sidecar kms-public-key --config "$WORK/config.toml" \
+    --public-key-out "$WORK/public_key.hex"
+}
+if sidecar env >/dev/null 2>&1; then echo "FAIL: accepted an untrusted certificate"; exit 1; fi
+sidecar env SSL_CERT_FILE="$PWD/$WORK/tls/kms.pem"
+cmp "$WORK/public_key.hex" "$WORK/tower_public_key.hex"
+echo "OK: same over HTTPS with SigV4; refused without the certificate as trust root"

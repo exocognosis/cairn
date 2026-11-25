@@ -28,6 +28,9 @@ use std::collections::BTreeMap;
 use threshold_mldsa::fips204::{self, PolyVec, K};
 use threshold_mldsa::mithril::{self, GroupKey, PartyKey, Subset};
 
+#[path = "recover.rs"]
+pub mod recover;
+
 type Bytes32 = [u8; 32];
 
 /// A party's long-term identity (Ed25519). The private part never leaves the party.

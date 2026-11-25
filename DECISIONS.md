@@ -467,3 +467,19 @@ the reference at a pinned commit into `target/`, adds one test file
 runs mixed Go/Rust committees. It is ignored by default and not in CI, because it needs Go
 and a network fetch. The reference hashes `tr || msg`, so it is given `0 || 0 || msg` to
 match FIPS 204's empty-context encoding. D-91's "read, not executed" no longer holds.
+
+**D-93. TLS on the KMS hop by termination in front of the HTTP server.** `tiny_http`'s own TLS
+needs an old rustls. Instead a small relay accepts TLS (rustls, the version already used
+for node links) on the listen address and forwards to the HTTP server on loopback. Server
+certificate only: callers are authenticated by SigV4. The certificate is self-signed and the
+caller trusts that exact certificate; pqc-sidecar does so through `SSL_CERT_FILE`.
+
+**D-94. Metrics on their own listener.** `/metrics` and `/healthz` are unauthenticated, so
+they are served on a separate address that defaults to off, not on the signing port.
+
+**D-95. Share recovery, not refresh.** A lost share is rebuilt from the other holders of each
+subset secret and verified against the public per-subset keys. The exchange is file based
+and the requesting process must stay alive, because the X25519 keys it decrypts with are
+ephemeral and never written to disk. No refresh is offered: re-randomising short shares
+without growing them is an open design problem, and offering something weaker under that
+name would mislead operators.

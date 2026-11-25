@@ -61,10 +61,23 @@ Multi-process cluster:
                   [--peers <peers.json> --group <group.bin> --tls <dir>]   (sign through a cluster)
                   [--round-timeout-ms <n>] [--mpc-timeout-ms <n>] [--link-delay-ms <n>]
                   [--access-key-id <id> --secret-access-key-file <file>]
+                  [--tls-cert <kms.pem> --tls-key <kms.key>] [--metrics-listen <addr:port>]
       Requests must be signed (AWS SigV4) with those credentials; the secret may also come
       from CAIRN_KMS_SECRET_ACCESS_KEY. Without credentials the endpoint binds loopback only.
       KMS-compatible endpoint for pqc-sidecar's aws_kms backend. Without --peers the tower runs
       inside this process.
+      With --tls-cert the endpoint speaks HTTPS; give the caller the certificate as its trust
+      root (for pqc-sidecar: SSL_CERT_FILE=kms.pem). --metrics-listen serves Prometheus
+      counters on /metrics and a liveness check on /healthz, unauthenticated.
+  cairn share-recover --id party_<k> --identity <file> --roster <file> --committee <committee.bin>
+                      --dir <exchange dir> --out <dir> [--wait-secs <n>]
+  cairn share-help --share <party_j.share> --identity <file> --roster <file>
+                   --committee <committee.bin> --request <request.bin> --out <reply-j.bin>
+      Restore a party's share after its machine is lost, from the other parties, without
+      changing the key. Every secret received is checked against the committee's public keys.
+      This does not invalidate a leaked copy of the old share.
+  cairn kms-cert --out <dir> [--host <name-or-ip>[,<name-or-ip>...]]
+      Self-signed certificate and key for the KMS endpoint's HTTPS listener.
   cairn mock-chain [--listen <addr:port>] [--chain-id <id>] [--height <n>]
       Minimal CometBFT RPC stand-in for end-to-end runs without a chain.
   cairn remote-bench --peers <peers.json> --group <group.bin> --tls <dir> [--signatures <n>]
@@ -287,6 +300,30 @@ fn run(args: &[String]) -> Result<(), String> {
                     None
                 }
             };
+            // HTTPS on the listen address, with a certificate from `cairn kms-cert`.
+            let server_tls = match (arg(args, "--tls-cert"), arg(args, "--tls-key")) {
+                (Some(cert), Some(key)) => Some(
+                    cairn_net::tls::ServerTls::load(&PathBuf::from(cert), &PathBuf::from(key))
+                        .map_err(|e| e.to_string())?,
+                ),
+                (None, None) => {
+                    if auth.is_some() {
+                        eprintln!("cairn: KMS requests travel over plain HTTP (no --tls-cert)");
+                    }
+                    None
+                }
+                _ => return Err("--tls-cert and --tls-key go together".into()),
+            };
+            let metrics = kms::Metrics::new();
+            if let Some(addr) = arg(args, "--metrics-listen") {
+                let addr = kms::serve_metrics(&addr, metrics.clone()).map_err(|e| e.to_string())?;
+                eprintln!("cairn: metrics on http://{addr}/metrics, health on /healthz");
+            }
+            let options = kms::KmsOptions {
+                auth,
+                tls: server_tls,
+                metrics: Some(metrics),
+            };
             let endpoint = match peers(args)? {
                 Some(peers) if arg(args, "--committee").is_some() => {
                     let file = arg(args, "--committee").ok_or("--committee <committee.bin>")?;
@@ -313,7 +350,7 @@ fn run(args: &[String]) -> Result<(), String> {
                         tls(args, NodeId::Coordinator)?,
                     )
                     .map_err(|e| e.to_string())?;
-                    kms::serve_with(&listen, signer, auth.clone())
+                    kms::serve_opts(&listen, signer, options)
                 }
                 Some(peers) => {
                     let file = arg(args, "--group").ok_or("--peers needs --group <group.bin>")?;
@@ -335,7 +372,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     let signer =
                         ClusterSigner::new(group, peers, policy, tls(args, NodeId::Coordinator)?)
                             .map_err(|e| e.to_string())?;
-                    kms::serve_with(&listen, signer, auth.clone())
+                    kms::serve_opts(&listen, signer, options)
                 }
                 None => {
                     let tower = Tower::deal(&seed(args)?, &params, &mut OsRng)
@@ -349,7 +386,7 @@ fn run(args: &[String]) -> Result<(), String> {
                         write_public_key(path, certifier.public_key())
                             .map_err(|e| e.to_string())?;
                     }
-                    kms::serve_with(&listen, certifier, auth.clone())
+                    kms::serve_opts(&listen, certifier, options)
                 }
             }
             .map_err(|e| e.to_string())?;
@@ -783,6 +820,118 @@ fn run(args: &[String]) -> Result<(), String> {
                 }
             }
             let _ = std::fs::remove_dir_all(&work);
+            Ok(())
+        }
+        Some(cmd @ ("share-recover" | "share-help")) => {
+            use cairn_net::dkg::{self, recover};
+            let need = |flag: &str| arg(args, flag).ok_or(format!("{cmd} needs {flag}"));
+            let read = |flag: &str| {
+                let file = need(flag)?;
+                std::fs::read(&file).map_err(|e| format!("{file}: {e}"))
+            };
+            let identity = dkg::Identity::from_pkcs8(&read("--identity")?)?;
+            let roster = dkg::roster_from_json(&String::from_utf8_lossy(&read("--roster")?))?;
+            let key = cairn_net::flat::read_committee(&PathBuf::from(need("--committee")?))
+                .map_err(|e| e.to_string())?;
+            if cmd == "share-help" {
+                let share = cairn_net::flat::read_party_share(&PathBuf::from(need("--share")?))
+                    .map_err(|e| e.to_string())?;
+                let request: recover::Request =
+                    bincode::deserialize(&read("--request")?).map_err(|e| e.to_string())?;
+                let reply = recover::help(&identity, &roster, &key, &share, &request)?;
+                let out = need("--out")?;
+                std::fs::write(&out, bincode::serialize(&reply).map_err(|e| e.to_string())?)
+                    .map_err(|e| format!("{out}: {e}"))?;
+                eprintln!(
+                    "cairn: sealed the secrets party {} shares with party {} into {out}",
+                    share.index + 1,
+                    request.index + 1
+                );
+                return Ok(());
+            }
+            let NodeId::Party(number) = need("--id")?.parse::<NodeId>()? else {
+                return Err("--id must be party_<k>".into());
+            };
+            let dir = PathBuf::from(need("--dir")?);
+            let out = PathBuf::from(need("--out")?);
+            let wait = Duration::from_secs(ms(args, "--wait-secs", 3600)?);
+            let (mut pending, request) =
+                recover::Pending::begin(&identity, &roster, &key, number - 1)?;
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            std::fs::write(
+                dir.join("request.bin"),
+                bincode::serialize(&request).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            eprintln!(
+                "cairn: wrote {}; give it to the other parties and put their replies in {} as \
+                 reply-*.bin. Keep this process running: the decryption keys exist only here.",
+                dir.join("request.bin").display(),
+                dir.display()
+            );
+            let started = std::time::Instant::now();
+            let mut seen = std::collections::BTreeSet::new();
+            while !pending.missing(&key).is_empty() {
+                if started.elapsed() > wait {
+                    return Err(format!(
+                        "gave up with {} subset secret(s) missing; start again with a new request",
+                        pending.missing(&key).len()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                for entry in std::fs::read_dir(&dir)
+                    .map_err(|e| e.to_string())?
+                    .flatten()
+                {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    // Keyed by size too, so a file caught half-written is read again.
+                    let size = entry.metadata().map_or(0, |m| m.len());
+                    if !name.starts_with("reply-") || !seen.insert((name.clone(), size)) {
+                        continue;
+                    }
+                    let outcome = std::fs::read(entry.path())
+                        .map_err(|e| e.to_string())
+                        .and_then(|b| {
+                            bincode::deserialize::<recover::Reply>(&b).map_err(|e| e.to_string())
+                        })
+                        .and_then(|reply| pending.accept(&roster, &key, &reply));
+                    match outcome {
+                        Ok(left) => eprintln!("cairn: {name} accepted, {left} subset(s) missing"),
+                        Err(e) => eprintln!("cairn: {name} refused: {e}"),
+                    }
+                }
+            }
+            let share = pending.finish(&key)?;
+            cairn_net::flat::write_party_files(&out, &key, &share).map_err(|e| e.to_string())?;
+            eprintln!(
+                "cairn: share of party {number} restored into {}",
+                out.display()
+            );
+            Ok(())
+        }
+        Some("kms-cert") => {
+            use std::os::unix::fs::OpenOptionsExt;
+            let out = PathBuf::from(arg(args, "--out").ok_or("kms-cert needs --out <dir>")?);
+            let hosts: Vec<String> = arg(args, "--host")
+                .unwrap_or_else(|| "localhost,127.0.0.1".into())
+                .split(',')
+                .map(str::to_owned)
+                .collect();
+            let (cert, key) =
+                cairn_net::tls::ServerTls::self_signed(&hosts).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+            std::fs::write(out.join("kms.pem"), cert).map_err(|e| e.to_string())?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(out.join("kms.key"))
+                .map_err(|e| format!("kms.key: {e}"))?;
+            std::io::Write::write_all(&mut f, key.as_bytes()).map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                json!({ "cert": out.join("kms.pem"), "key": out.join("kms.key"), "hosts": hosts })
+            );
             Ok(())
         }
         Some("identity") => {

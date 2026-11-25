@@ -230,6 +230,73 @@ fn kms_call(url: &str, target: &str, body: serde_json::Value) -> (u16, serde_jso
     (status, serde_json::from_str(json).unwrap())
 }
 
+/// The same request over TLS, trusting exactly `cert_pem`.
+fn kms_call_tls(addr: std::net::SocketAddr, cert_pem: &str) -> Result<u16, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut cert_pem.as_bytes()) {
+        roots.add(cert.unwrap()).unwrap();
+    }
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    let conn = rustls::ClientConnection::new(std::sync::Arc::new(config), name).unwrap();
+    let tcp = std::net::TcpStream::connect(addr).unwrap();
+    let mut stream = rustls::StreamOwned::new(conn, tcp);
+    write!(
+        stream,
+        "POST / HTTP/1.1\r\nHost: kms\r\nX-Amz-Target: TrentService.GetPublicKey\r\nContent-Type: application/x-amz-json-1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+    )
+    .map_err(|e| e.to_string())?;
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    let response = String::from_utf8_lossy(&response);
+    response
+        .split(' ')
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| "no HTTP response".to_string())
+}
+
+#[test]
+fn kms_endpoint_serves_https_and_counts_requests() {
+    use cairn_net::tls::ServerTls;
+    let hosts = ["localhost".to_string()];
+    let (cert, key) = ServerTls::self_signed(&hosts).unwrap();
+    let metrics = kms::Metrics::new();
+    let endpoint = kms::serve_opts(
+        "127.0.0.1:0",
+        certifier(),
+        kms::KmsOptions {
+            tls: Some(ServerTls::from_pem(&cert, &key).unwrap()),
+            metrics: Some(metrics.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(endpoint.url().starts_with("https://"));
+    assert_eq!(kms_call_tls(endpoint.addr, &cert), Ok(200));
+    // A caller that trusts a different certificate does not get through.
+    let (other, _) = ServerTls::self_signed(&hosts).unwrap();
+    assert!(kms_call_tls(endpoint.addr, &other).is_err());
+    assert!(metrics.render().contains("cairn_kms_requests_total 1\n"));
+
+    let scrape = kms::serve_metrics("127.0.0.1:0", metrics).unwrap();
+    let mut stream = std::net::TcpStream::connect(scrape).unwrap();
+    write!(
+        stream,
+        "GET /metrics HTTP/1.1\r\nHost: m\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut body = String::new();
+    stream.read_to_string(&mut body).unwrap();
+    assert!(body.contains("cairn_kms_signatures_total 0"));
+}
+
 #[test]
 fn kms_endpoint_signs_through_the_tower() {
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};

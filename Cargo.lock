@@ -77,6 +77,7 @@ name = "cairn-sidecar"
 version = "0.2.0"
 dependencies = [
  "base64",
+ "bincode",
  "cairn-net",
  "cascade-tower",
  "hex",
@@ -84,6 +85,8 @@ dependencies = [
  "ml-dsa",
  "mpc-bridge",
  "rand",
+ "rustls",
+ "rustls-pemfile",
  "serde_json",
  "sha2",
  "sha3",

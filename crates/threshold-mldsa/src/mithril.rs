@@ -258,6 +258,11 @@ impl PartyKey {
         Self { index, shares }
     }
 
+    /// One subset's secret, if this party holds it.
+    pub fn secret(&self, subset: &[u8]) -> Option<&(PolyVec, PolyVec)> {
+        self.shares.get(subset)
+    }
+
     /// The subsets whose secrets this party holds.
     pub fn subsets(&self) -> Vec<Subset> {
         self.shares.keys().cloned().collect()
