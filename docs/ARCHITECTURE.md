@@ -77,4 +77,5 @@ latency and maturity favour the flat protocol.
   check or a rule system attaches through a command or local service ([HOOKS.md](HOOKS.md)).
   A changed roster does not change a running committee (that needs resharing).
 - **Other front ends** (PKCS#11, KMIP, gRPC, peer-to-peer). `cairn-gateway` has the KMS API
-  only, and it depends on `cairn-net` for its TLS listener.
+  only. It depends on `cairn-core` alone: it serves any `ThresholdSigner` and knows nothing
+  of how the parties talk.

@@ -49,7 +49,7 @@ pub struct KmsOptions {
     /// AWS SigV4 credentials every request must be signed with.
     pub auth: Option<crate::sigv4::KmsAuth>,
     /// Serve HTTPS on the listen address. The HTTP server itself then binds loopback only.
-    pub tls: Option<cairn_net::tls::ServerTls>,
+    pub tls: Option<crate::tls::ServerTls>,
     /// Counters to update, usually also given to [`serve_metrics`].
     pub metrics: Option<Arc<Metrics>>,
 }

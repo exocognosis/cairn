@@ -608,3 +608,14 @@ as the party.
 **D-118. External checks run before the stateful policy.** With `AllOf`, the hook is asked
 first and the checkpoint rules last, so a party records a height only for a checkpoint its
 own finality check accepted.
+
+**D-119. The gateway depends on the signer interface only.** The KMS endpoint's TLS listener
+moved from `cairn-net` into `cairn-gateway`, which now depends on `cairn-core` and nothing
+else of cairn. A front end cannot reach into the party transport, and a new front end needs
+no knowledge of it.
+
+**D-120. `serve-kms --backend flat|tower` names the engine.** Without it the engine is
+inferred from the key material as before (`--committee` is flat, `--group` or nothing is
+tower). With it, key material for the other engine is refused, and `--backend flat` with no
+peers runs an in-process committee for trying the API. The endpoint caches signatures by
+message, so a repeated request returns the same bytes on either engine.

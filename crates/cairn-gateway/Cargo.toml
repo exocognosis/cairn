@@ -14,10 +14,13 @@ categories.workspace = true
 [dependencies]
 base64.workspace = true
 cairn-core = { path = "../cairn-core" }
-cairn-net = { path = "../cairn-net" }
 hmac.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sha3.workspace = true
 tiny_http.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true

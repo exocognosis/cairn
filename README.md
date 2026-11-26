@@ -341,7 +341,7 @@ interval = 100   # checkpoint cadence: every K finalized blocks
 | `cairn keygen --out <dir>` | Create the key shares, address book and TLS certificates for a cluster. |
 | `cairn node --role signer\|root ...` | Run one signer or one root engine. |
 | `cairn mpc-worker --socket-dir <dir>` | Run the stand-in MPC backend (clear text, for testing). |
-| `cairn serve-kms ...` | Coordinate signing and expose it as a KMS-compatible endpoint for pqc-sidecar. |
+| `cairn serve-kms [--backend flat\|tower] ...` | Coordinate signing and expose it as a KMS-compatible endpoint. `flat` is the three-round committee (randomized signatures), `tower` the two-tier protocol (deterministic). |
 | `cairn mock-chain` | A minimal CometBFT RPC stand-in for end-to-end runs without a chain. |
 | `cairn identity`, `cairn dkg-party`, `cairn dkg` | Distributed key generation for a flat committee: no dealer. |
 | `cairn node --role party` | A committee party (three-round protocol). `cairn keygen --committee` is the dealer shortcut for tests. |

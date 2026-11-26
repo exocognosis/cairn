@@ -264,7 +264,7 @@ fn kms_call_tls(addr: std::net::SocketAddr, cert_pem: &str) -> Result<u16, Strin
 
 #[test]
 fn kms_endpoint_serves_https_and_counts_requests() {
-    use cairn_net::tls::ServerTls;
+    use cairn_gateway::tls::ServerTls;
     let hosts = ["localhost".to_string()];
     let (cert, key) = ServerTls::self_signed(&hosts).unwrap();
     let metrics = kms::Metrics::new();

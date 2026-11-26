@@ -84,7 +84,7 @@ checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
 
 [[package]]
 name = "cairn-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cascade-tower",
  "rand",
@@ -96,22 +96,25 @@ dependencies = [
 
 [[package]]
 name = "cairn-gateway"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64",
  "cairn-core",
- "cairn-net",
  "hmac",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
  "serde_json",
  "sha2",
  "sha3",
  "tiny_http",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
 name = "cairn-net"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bincode",
  "cairn-policy",
@@ -135,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-policy"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ml-dsa",
  "serde_json",
@@ -145,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-sidecar"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64",
  "bincode",
@@ -172,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "cascade-tower"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "rand",
  "sha3",
@@ -481,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "mpc-bridge"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cascade-tower",
  "rand",
@@ -853,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "threshold-mldsa"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "astro-float",
  "bincode",

@@ -8,3 +8,4 @@
 
 pub mod kms;
 pub mod sigv4;
+pub mod tls;

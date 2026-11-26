@@ -24,6 +24,23 @@ fn text(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 
+fn kms_call(url: &str, target: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
+    use std::io::{Read as _, Write as _};
+    let body = body.to_string();
+    let mut stream = std::net::TcpStream::connect(url.trim_start_matches("http://")).unwrap();
+    write!(
+        stream,
+        "POST / HTTP/1.1\r\nHost: kms\r\nX-Amz-Target: {target}\r\nContent-Type: application/x-amz-json-1.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let status = response.split(' ').nth(1).unwrap().parse().unwrap();
+    let json = response.split("\r\n\r\n").nth(1).unwrap();
+    (status, serde_json::from_str(json).unwrap())
+}
+
 #[test]
 fn an_organization_committee_signs_only_what_two_approvers_approved() {
     let base: PathBuf =
@@ -113,6 +130,30 @@ fn an_organization_committee_signs_only_what_two_approvers_approved() {
     let log = std::fs::read_to_string(work.join("party_1.audit.log")).unwrap();
     assert!(log.contains(r#""approved_by":["alice","carol"]"#), "{log}");
     assert!(log.contains(r#""event":"refused""#) && log.contains(r#""event":"authorized""#));
+
+    // The same committee behind the KMS-compatible API: a client that only speaks AWS KMS
+    // gets a signature for the approved payload and an error for anything else.
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let endpoint = cairn_sidecar::kms::serve("127.0.0.1:0", signer).unwrap();
+    let sign = |message: &[u8]| {
+        kms_call(
+            &endpoint.url(),
+            "TrentService.Sign",
+            serde_json::json!({
+                "KeyId": "alias/cairn",
+                "Message": B64.encode(message),
+                "MessageType": "RAW",
+                "SigningAlgorithm": "ML_DSA_SHAKE_256",
+            }),
+        )
+    };
+    let (status, got) = sign(payload);
+    assert_eq!(status, 200, "{got}");
+    let signature = B64.decode(got["Signature"].as_str().unwrap()).unwrap();
+    assert!(cairn_core::verify(&pk, payload, &signature));
+    let (status, got) = sign(b"wire 1,000,000 to account 42");
+    assert_ne!(status, 200, "{got}");
+    assert!(got.get("Signature").is_none());
     drop(committee);
     let _ = std::fs::remove_dir_all(&base);
 }

@@ -89,7 +89,7 @@ Multi-process cluster:
   cairn committee-bench [--committees 2-of-3,3-of-4] [--signatures <n>] [--rtt-ms <a,b>]
   cairn mpc-worker --socket-dir <dir>
       Reference three-party MPC backend (clear text, NOT a secure computation).
-  cairn serve-kms [--listen <addr:port>] [--public-key-out <file>]
+  cairn serve-kms [--listen <addr:port>] [--public-key-out <file>] [--backend flat|tower]
                   [--peers <peers.json> --group <group.bin> --tls <dir>]   (sign through a cluster)
                   [--round-timeout-ms <n>] [--mpc-timeout-ms <n>] [--link-delay-ms <n>]
                   [--access-key-id <id> --secret-access-key-file <file>]
@@ -399,7 +399,7 @@ fn run(args: &[String]) -> Result<(), String> {
             // HTTPS on the listen address, with a certificate from `cairn kms-cert`.
             let server_tls = match (arg(args, "--tls-cert"), arg(args, "--tls-key")) {
                 (Some(cert), Some(key)) => Some(
-                    cairn_net::tls::ServerTls::load(&PathBuf::from(cert), &PathBuf::from(key))
+                    cairn_gateway::tls::ServerTls::load(&PathBuf::from(cert), &PathBuf::from(key))
                         .map_err(|e| e.to_string())?,
                 ),
                 (None, None) => {
@@ -420,8 +420,52 @@ fn run(args: &[String]) -> Result<(), String> {
                 tls: server_tls,
                 metrics: Some(metrics),
             };
+            // The engine is a configuration choice: `flat` is the three-round committee
+            // protocol (randomized signatures), `tower` the two-tier one (deterministic).
+            let backend = match arg(args, "--backend") {
+                Some(name) => {
+                    let backend: cairn_core::Backend =
+                        name.parse().map_err(|_| "--backend is flat or tower")?;
+                    match backend {
+                        cairn_core::Backend::Flat if arg(args, "--group").is_some() => {
+                            return Err("--backend flat signs with --committee, not --group".into())
+                        }
+                        cairn_core::Backend::Tower if arg(args, "--committee").is_some() => {
+                            return Err("--backend tower signs with --group, not --committee".into())
+                        }
+                        _ => backend,
+                    }
+                }
+                None if arg(args, "--committee").is_some() => cairn_core::Backend::Flat,
+                None => cairn_core::Backend::Tower,
+            };
+            let flat = backend == cairn_core::Backend::Flat;
             let endpoint = match peers(args)? {
-                Some(peers) if arg(args, "--committee").is_some() => {
+                None if flat => {
+                    // In-process committee, for trying the API: every share lives here.
+                    if arg(args, "--committee").is_some() {
+                        return Err("--committee <committee.bin> needs --peers".into());
+                    }
+                    let members = arg(args, "--members").is_some()
+                        || arg(args, "--members-command").is_some();
+                    let roster = match members {
+                        true => committee_shape(args)?.2.ok_or("no roster")?,
+                        false => cairn_core::Roster::uniform(
+                            2,
+                            (1..=3).map(|i| format!("party-{i}")),
+                        ),
+                    };
+                    let (t, n) = roster.flat_shape().map_err(|e| e.to_string())?;
+                    let signer =
+                        cairn_core::LocalFlat::deal(&roster).map_err(|e| e.to_string())?;
+                    if let Some(path) = &pk_out {
+                        use cairn_core::ThresholdSigner as _;
+                        write_public_key(path, &signer.public_key()).map_err(|e| e.to_string())?;
+                    }
+                    eprintln!("cairn: in-process {t}-of-{n} committee, NOT a distributed signer");
+                    kms::serve_opts(&listen, signer, options)
+                }
+                Some(peers) if flat => {
                     let file = arg(args, "--committee").ok_or("--committee <committee.bin>")?;
                     let key = Arc::new(
                         cairn_net::flat::read_committee(&PathBuf::from(file))
@@ -488,7 +532,8 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             .map_err(|e| e.to_string())?;
             eprintln!(
-                "cairn: KMS-compatible tower endpoint on {} (aws_endpoint_url)",
+                "cairn: KMS-compatible {} endpoint on {} (aws_endpoint_url)",
+                backend.name(),
                 endpoint.url()
             );
             endpoint.join();
@@ -1296,7 +1341,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 .map(str::to_owned)
                 .collect();
             let (cert, key) =
-                cairn_net::tls::ServerTls::self_signed(&hosts).map_err(|e| e.to_string())?;
+                cairn_gateway::tls::ServerTls::self_signed(&hosts).map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
             std::fs::write(out.join("kms.pem"), cert).map_err(|e| e.to_string())?;
             let mut f = std::fs::OpenOptions::new()
