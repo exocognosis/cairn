@@ -450,14 +450,12 @@ fn run(args: &[String]) -> Result<(), String> {
                         || arg(args, "--members-command").is_some();
                     let roster = match members {
                         true => committee_shape(args)?.2.ok_or("no roster")?,
-                        false => cairn_core::Roster::uniform(
-                            2,
-                            (1..=3).map(|i| format!("party-{i}")),
-                        ),
+                        false => {
+                            cairn_core::Roster::uniform(2, (1..=3).map(|i| format!("party-{i}")))
+                        }
                     };
                     let (t, n) = roster.flat_shape().map_err(|e| e.to_string())?;
-                    let signer =
-                        cairn_core::LocalFlat::deal(&roster).map_err(|e| e.to_string())?;
+                    let signer = cairn_core::LocalFlat::deal(&roster).map_err(|e| e.to_string())?;
                     if let Some(path) = &pk_out {
                         use cairn_core::ThresholdSigner as _;
                         write_public_key(path, &signer.public_key()).map_err(|e| e.to_string())?;

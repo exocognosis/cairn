@@ -85,8 +85,15 @@ fn a_backend_that_contradicts_the_key_material_is_refused() {
         ["--backend", "flat", "--group", "group.bin"],
         ["--backend", "ring", "--listen", "127.0.0.1:0"],
     ] {
-        let out = Command::new(CAIRN).arg("serve-kms").args(args).output().unwrap();
+        let out = Command::new(CAIRN)
+            .arg("serve-kms")
+            .args(args)
+            .output()
+            .unwrap();
         assert!(!out.status.success(), "{args:?}");
-        assert!(String::from_utf8_lossy(&out.stderr).contains("--backend"), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("--backend"),
+            "{args:?}"
+        );
     }
 }
