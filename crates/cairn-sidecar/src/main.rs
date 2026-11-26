@@ -32,7 +32,7 @@ Single process (simulation harness):
 Multi-process cluster:
   cairn keygen --out <dir> [--seed-hex <64 hex>] [--host <ip>] [--base-port <port>]
       Trusted-dealer setup: writes group.bin, one .share file per signer, peers.json,
-      public_key.hex and tls/ (cluster CA, one certificate and key per node).
+      public_key.hex and tls/ (one self-signed certificate and key per node, pinned).
   cairn node --role signer|root --id <leaf_i/signer_j|root_k> --bind <addr:port>
              --peers <peers.json|id=addr,...> --group <group.bin> --tls <dir>
              [--share <file>]            (signer)
@@ -489,6 +489,7 @@ fn run(args: &[String]) -> Result<(), String> {
                         },
                     )
                     .map_err(|e| format!("signing policy state: {e}"))?;
+                    let policy = cairn_policy::PosCheckpointPolicy::from(policy);
                     if arg(args, "--state").is_none() {
                         eprintln!("cairn node {id}: no --state file; the last signed height is forgotten on restart");
                     }

@@ -13,7 +13,10 @@ pub mod dkg;
 pub mod failover;
 pub mod flat;
 pub mod node;
-pub mod policy;
+/// The checkpoint rules, kept at their old path. They live in `cairn-policy`.
+pub mod policy {
+    pub use cairn_policy::pos::*;
+}
 pub mod tls;
 pub mod transport;
 pub mod wire;

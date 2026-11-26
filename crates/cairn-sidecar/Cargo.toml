@@ -18,7 +18,10 @@ path = "src/main.rs"
 [dependencies]
 base64.workspace = true
 bincode.workspace = true
+cairn-core = { path = "../cairn-core" }
+cairn-gateway = { path = "../cairn-gateway" }
 cairn-net = { path = "../cairn-net" }
+cairn-policy = { path = "../cairn-policy" }
 cascade-tower = { path = "../cascade-tower" }
 hex.workspace = true
 hmac.workspace = true

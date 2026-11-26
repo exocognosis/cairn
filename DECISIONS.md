@@ -542,3 +542,28 @@ every signing node already has it, every peer already pins it, and rotation and 
 already work; the price is one key with two uses, separated by a prefix no TLS 1.3 handshake
 signature can carry. The coordinator checks the signatures too, so that a party sending a bad
 one is named instead of the honest parties that refuse because of it. Wire version 3.
+
+**D-106. One kernel, three layers.** The signing engines know nothing about what is signed
+or who asks. `cairn-core` holds the interface both engines share (`ThresholdSigner`,
+rosters, verification); `cairn-policy` holds what a party will sign; `cairn-gateway` holds
+client protocols. Chains and organizations differ in the last two only, so they are where
+new code goes. `docs/ARCHITECTURE.md` has the boundaries.
+
+**D-107. The policy is a trait the party owns.** `PolicyEngine::authorize_sign(&self, ctx,
+payload)` takes `&self` so a party can consult it from any connection; an implementation
+with memory locks inside. The checkpoint rules moved unchanged into
+`cairn_policy::pos` and are wrapped as `PosCheckpointPolicy`; `cairn_net::policy` still
+re-exports them. Refusal reasons travel as the same strings, so the wire format (version 3)
+is untouched.
+
+**D-108. `reshare` exists and refuses.** The signer interface has the method so key-lifecycle
+callers have one entry point, and every backend returns `Unsupported`. An interface that
+pretended otherwise would be worse than none.
+
+**D-109. Weights stop at the roster.** A `Roster` carries weights because the tower's
+assignment and any chain adapter need them. The flat protocol has none, so
+`Roster::flat_shape` refuses weighted or oversized rosters instead of approximating them.
+
+**D-110. The KMS front end keeps `cairn-net` as a dependency.** Its TLS listener is the one
+in `cairn-net`. Moving that into a transport-free crate is possible and was left: it would
+change no behaviour and the gateway already takes any `ThresholdSigner`.

@@ -1,7 +1,7 @@
 //! Running the tower as separate OS processes: the cluster-backed KMS signer, a process
 //! launcher for tests and benchmarks, and a minimal CometBFT RPC stand-in.
 
-use crate::kms::KmsSigner;
+use cairn_core::{Backend, SignerError, ThresholdSigner};
 use cairn_net::cluster::{node_ids, peers_to_json, share_file, write_keys};
 use cairn_net::{Coordinator, FaultMode, NetPolicy, NetReport, NodeId, Peers, TlsIdentity};
 use serde_json::{json, Value};
@@ -51,13 +51,19 @@ impl ClusterSigner {
     }
 }
 
-impl KmsSigner for ClusterSigner {
+impl ThresholdSigner for ClusterSigner {
+    fn backend(&self) -> Backend {
+        Backend::Tower
+    }
+
     fn public_key(&self) -> [u8; PUBLIC_KEY_BYTES] {
         self.coordinator.group().pk
     }
 
-    fn sign(&mut self, message: &[u8]) -> Result<[u8; SIGNATURE_BYTES], String> {
-        let (signature, report) = self.sign_with_report(message)?;
+    fn sign(&mut self, message: &[u8]) -> Result<[u8; SIGNATURE_BYTES], SignerError> {
+        let (signature, report) = self
+            .sign_with_report(message)
+            .map_err(SignerError::Failed)?;
         self.last_report = Some(report);
         Ok(signature)
     }
@@ -444,12 +450,16 @@ impl CommitteeSigner {
     }
 }
 
-impl KmsSigner for CommitteeSigner {
+impl ThresholdSigner for CommitteeSigner {
+    fn backend(&self) -> Backend {
+        Backend::Flat
+    }
+
     fn public_key(&self) -> [u8; PUBLIC_KEY_BYTES] {
         self.coordinator.key().pk
     }
 
-    fn sign(&mut self, message: &[u8]) -> Result<[u8; SIGNATURE_BYTES], String> {
+    fn sign(&mut self, message: &[u8]) -> Result<[u8; SIGNATURE_BYTES], SignerError> {
         let outcome = self.sign_with_report(message);
         // One audit line per request on stderr: what was asked, who signed, what it took.
         let checkpoint = cairn_net::policy::Checkpoint::parse(message);
@@ -472,7 +482,9 @@ impl KmsSigner for CommitteeSigner {
             }),
         };
         eprintln!("{line}");
-        outcome.map(|(signature, _)| signature)
+        outcome
+            .map(|(signature, _)| signature)
+            .map_err(SignerError::Failed)
     }
 }
 

@@ -1,0 +1,17 @@
+[package]
+name = "cairn-policy"
+description = "What a cairn party agrees to sign: the policy interface and the checkpoint rules for proof-of-stake chains"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+authors.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+sha3.workspace = true
+thiserror.workspace = true

@@ -10,8 +10,9 @@
 //! Requests are not authenticated (SigV4 headers are ignored): bind to loopback or a private
 //! interface only.
 
-use crate::certifier::TowerCertifier;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+pub use cairn_core::ThresholdSigner as KmsSigner;
+use cairn_core::SIGNATURE_BYTES;
 use serde_json::{json, Value};
 use sha3::{Digest, Sha3_256};
 use std::io::Read as _;
@@ -19,8 +20,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use threshold_mldsa::AttemptEngine;
-use threshold_mldsa::{PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 use tiny_http::{Header, Response, Server};
 
 /// DER SubjectPublicKeyInfo header for ML-DSA-65 (OID 2.16.840.1.101.3.4.3.18).
@@ -31,24 +30,6 @@ pub const SPKI_PREFIX: [u8; 22] = [
 
 /// Largest message KMS accepts with `MessageType = RAW`.
 pub const MAX_RAW_MESSAGE: usize = 4096;
-
-/// Whatever produces signatures behind the endpoint: the in-process tower or a TCP cluster.
-pub trait KmsSigner: Send + 'static {
-    fn public_key(&self) -> [u8; PUBLIC_KEY_BYTES];
-    fn sign(&mut self, message: &[u8]) -> Result<[u8; SIGNATURE_BYTES], String>;
-}
-
-impl<E: AttemptEngine + Send + 'static> KmsSigner for TowerCertifier<E> {
-    fn public_key(&self) -> [u8; PUBLIC_KEY_BYTES] {
-        *TowerCertifier::public_key(self)
-    }
-
-    fn sign(&mut self, message: &[u8]) -> Result<[u8; SIGNATURE_BYTES], String> {
-        self.sign_message(message)
-            .map(|s| s.signature)
-            .map_err(|e| e.to_string())
-    }
-}
 
 /// Finished signatures by message digest.
 type Cache = std::collections::HashMap<[u8; 32], Box<[u8; SIGNATURE_BYTES]>>;
@@ -296,7 +277,7 @@ fn handle(
                 // The tower could not sign (quorum lost, retries exhausted). Retryable.
                 Err(e) => (
                     500,
-                    json!({ "__type": "KMSInternalException", "message": e }),
+                    json!({ "__type": "KMSInternalException", "message": e.to_string() }),
                 ),
             }
         }

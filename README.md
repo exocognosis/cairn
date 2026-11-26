@@ -167,6 +167,7 @@ the live sidecar flow and two-host deployment.
 | Short answers to common questions | [docs/FAQ.md](docs/FAQ.md) |
 | The protocol, message by message | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | Why each design choice was made (65 entries) | [DECISIONS.md](DECISIONS.md) |
+| How the kernel, policy and front-end layers fit, and what each may know | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | Everything that still blocks production use, with status | [docs/BLOCKERS.md](docs/BLOCKERS.md) |
 | Backup, certificate rotation, standby coordinator, monitoring, upgrades | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
 | Why cairn's additions to the protocol should be safe, and where that argument stops | [docs/SECURITY_ARGUMENT.md](docs/SECURITY_ARGUMENT.md) |
@@ -474,8 +475,11 @@ delivers. To get in touch, write to
 | `crates/threshold-mldsa` | FIPS 204 internals, nested Shamir dealing, share compression (`flatten`), the sealed MPC boundary and `AttemptEngine`, the in-process committee state machines. |
 | `crates/cascade-tower` | Tower shape and bounds, stake-weighted epoch assignment, the in-process two-tier `Tower`. |
 | `crates/mpc-bridge` | IPC protocol to the three-party backend (Unix sockets, binary frames), `IpcEngine` behind `AttemptEngine`, the reference worker. |
-| `crates/cairn-net` | Framed transport over mutual TLS with deadlines, signer and root-engine nodes, the session coordinator. |
-| `crates/cairn-sidecar` | `.pqcc` v2 certificates, KMS-compatible endpoint, process launcher, benchmarks, the `cairn` CLI. |
+| `crates/cairn-core` | The shared kernel interface: `ThresholdSigner` over both engines, committee rosters, standard verification. No chain or enterprise types. |
+| `crates/cairn-policy` | What a party agrees to sign: the `PolicyEngine` trait and the proof-of-stake checkpoint rules. |
+| `crates/cairn-net` | Framed transport over mutual TLS with deadlines, party, signer and root-engine nodes, the session coordinators. |
+| `crates/cairn-gateway` | Client front ends over any `ThresholdSigner`: the KMS-compatible endpoint and SigV4 checking. |
+| `crates/cairn-sidecar` | `.pqcc` v2 certificates, networked signers, process launcher, benchmarks, the `cairn` CLI. |
 | `mpc/mp-spdz` | MP-SPDZ program and launcher for the same IPC protocol. |
 | `scripts` | Verifier setup, local cluster, live end-to-end run. |
 

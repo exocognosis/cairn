@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 bincode.workspace = true
+cairn-policy = { path = "../cairn-policy" }
 futures-util.workspace = true
 mpc-bridge = { path = "../mpc-bridge" }
 rand.workspace = true

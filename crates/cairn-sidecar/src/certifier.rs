@@ -135,3 +135,22 @@ pub fn write_public_key(path: &Path, pk: &[u8; PUBLIC_KEY_BYTES]) -> std::io::Re
     }
     std::fs::write(path, format!("{}\n", hex::encode(pk)))
 }
+
+impl<E: AttemptEngine + Send + 'static> cairn_core::ThresholdSigner for TowerCertifier<E> {
+    fn backend(&self) -> cairn_core::Backend {
+        cairn_core::Backend::Tower
+    }
+
+    fn public_key(&self) -> [u8; PUBLIC_KEY_BYTES] {
+        *TowerCertifier::public_key(self)
+    }
+
+    fn sign(
+        &mut self,
+        message: &[u8],
+    ) -> Result<[u8; threshold_mldsa::SIGNATURE_BYTES], cairn_core::SignerError> {
+        self.sign_message(message)
+            .map(|s| s.signature)
+            .map_err(|e| cairn_core::SignerError::Failed(e.to_string()))
+    }
+}

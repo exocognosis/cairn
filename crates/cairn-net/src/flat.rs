@@ -20,10 +20,10 @@
 
 use crate::coordinator::{NetError, NetFault, NetFaultKind, NetPolicy, NetReport};
 use crate::node::{FaultMode, Peers};
-use crate::policy::Policy;
 use crate::tls::{ClusterTls, TlsIdentity};
 use crate::transport::{call, serve, CallError, Handler, Link, Pool, Reply};
 use crate::wire::{Attestation, Body, Frame, NodeId, NET_VERSION};
+use cairn_policy::{PolicyEngine, SignContext};
 use futures_util::future::join_all;
 use rand::rngs::OsRng;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -61,7 +61,7 @@ pub struct PartyNode {
     pub fault: FaultMode,
     sessions: Mutex<HashMap<[u8; 32], PartySession>>,
     presigns: Mutex<std::collections::VecDeque<Presigned>>,
-    policy: Mutex<Policy>,
+    policy: Box<dyn PolicyEngine>,
     /// Unused masks and half-finished sessions older than this are erased.
     pub mask_ttl: Duration,
     pub stats: Arc<PartyStats>,
@@ -202,7 +202,7 @@ impl PartyNode {
         key: Arc<GroupKey>,
         share: PartyKey,
         fault: FaultMode,
-        policy: Policy,
+        policy: impl PolicyEngine,
         tls: Arc<TlsIdentity>,
     ) -> Self {
         Self {
@@ -212,7 +212,7 @@ impl PartyNode {
             fault,
             sessions: Mutex::new(HashMap::new()),
             presigns: Mutex::default(),
-            policy: Mutex::new(policy),
+            policy: Box::new(policy),
             mask_ttl: MASK_TTL,
             stats: Arc::default(),
             tls,
@@ -245,13 +245,16 @@ impl PartyNode {
                 presign,
                 commitments,
             } => {
-                if let Err(reason) = self
-                    .policy
-                    .lock()
-                    .expect("policy")
-                    .authorize(&message, &session)
-                {
-                    return Body::PolicyRefused { reason };
+                let signers: Vec<u8> = commitments.iter().map(|(index, _)| *index).collect();
+                let ctx = SignContext {
+                    session: &session,
+                    party: self.share.index,
+                    signers: &signers,
+                };
+                if let Err(refused) = self.policy.authorize_sign(&ctx, &message) {
+                    return Body::PolicyRefused {
+                        reason: refused.to_string(),
+                    };
                 }
                 // Take the masks out of the pool: they can serve this one session only.
                 let taken = {
@@ -935,6 +938,24 @@ impl LocalCommittee {
         delay: Duration,
         mask_ttl: Duration,
     ) -> std::io::Result<Self> {
+        Self::start_policy(t, n, faults, delay, mask_ttl, |pk| {
+            Box::new(cairn_policy::PosCheckpointPolicy::from(
+                cairn_policy::pos::Policy::ephemeral(pk),
+            ))
+        })
+        .await
+    }
+
+    /// As [`start_with`](Self::start_with), each party running the policy `policy` builds for
+    /// the committee's public key.
+    pub async fn start_policy(
+        t: usize,
+        n: usize,
+        faults: &[(NodeId, FaultMode)],
+        delay: Duration,
+        mask_ttl: Duration,
+        policy: impl Fn(&[u8]) -> Box<dyn PolicyEngine>,
+    ) -> std::io::Result<Self> {
         let (key, parties) = mithril::keygen(t, n, &mut OsRng)
             .ok_or_else(|| std::io::Error::other("no parameters"))?;
         let key = Arc::new(key);
@@ -956,7 +977,7 @@ impl LocalCommittee {
                 key.clone(),
                 party,
                 fault,
-                Policy::ephemeral(&key.pk),
+                policy(&key.pk),
                 Arc::new(tls.identity(id)?),
             );
             node.mask_ttl = mask_ttl;

@@ -78,7 +78,7 @@ async fn a_committee_generates_its_key_without_a_dealer_and_then_signs() {
             committee.clone(),
             share,
             FaultMode::None,
-            Policy::ephemeral(&pk),
+            cairn_net::policy::PosCheckpointPolicy::from(Policy::ephemeral(&pk)),
             Arc::new(tls.identity(*id).unwrap()),
         );
         stats.push(node.stats.clone());

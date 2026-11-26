@@ -83,10 +83,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
 
 [[package]]
+name = "cairn-core"
+version = "0.5.0"
+dependencies = [
+ "cascade-tower",
+ "rand",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "threshold-mldsa",
+]
+
+[[package]]
+name = "cairn-gateway"
+version = "0.5.0"
+dependencies = [
+ "base64",
+ "cairn-core",
+ "cairn-net",
+ "hmac",
+ "serde_json",
+ "sha2",
+ "sha3",
+ "tiny_http",
+ "tokio",
+]
+
+[[package]]
 name = "cairn-net"
 version = "0.5.0"
 dependencies = [
  "bincode",
+ "cairn-policy",
  "futures-util",
  "mpc-bridge",
  "rand",
@@ -106,12 +134,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-policy"
+version = "0.5.0"
+dependencies = [
+ "serde_json",
+ "sha3",
+ "thiserror",
+]
+
+[[package]]
 name = "cairn-sidecar"
 version = "0.5.0"
 dependencies = [
  "base64",
  "bincode",
+ "cairn-core",
+ "cairn-gateway",
  "cairn-net",
+ "cairn-policy",
  "cascade-tower",
  "hex",
  "hmac",

@@ -1,4 +1,4 @@
-//! What a party agrees to sign, decided by the party itself.
+//! The checkpoint rules for proof-of-stake chains, decided by the party itself.
 //!
 //! The coordinator relays requests but is not trusted to choose what gets signed. Before a
 //! party reveals anything for a message it checks, on its own:
@@ -13,10 +13,12 @@
 //! across restarts. With `T` honest-rule-following parties out of `T` needed, two conflicting
 //! checkpoints for one height cannot both be signed.
 
+use crate::{PolicyEngine, PolicyError, SignContext};
 use sha3::{Digest, Sha3_256};
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 pub const CHECKPOINT_DOMAIN: &[u8] = b"pqc-sidecar/checkpoint/v2";
 const KEY_ID_DOMAIN: &[u8] = b"pqc-sidecar/key-id/v2";
@@ -243,6 +245,26 @@ impl Policy {
         }
         self.audit("authorized", session, Some(&checkpoint), "");
         Ok(checkpoint)
+    }
+}
+
+/// [`Policy`] as a [`PolicyEngine`]: what a proof-of-stake party runs.
+pub struct PosCheckpointPolicy(Mutex<Policy>);
+
+impl From<Policy> for PosCheckpointPolicy {
+    fn from(policy: Policy) -> Self {
+        Self(Mutex::new(policy))
+    }
+}
+
+impl PolicyEngine for PosCheckpointPolicy {
+    fn authorize_sign(&self, ctx: &SignContext, payload: &[u8]) -> Result<(), PolicyError> {
+        self.0
+            .lock()
+            .expect("policy")
+            .authorize(payload, ctx.session)
+            .map(|_| ())
+            .map_err(PolicyError::Refused)
     }
 }
 

@@ -1,0 +1,20 @@
+[package]
+name = "cairn-core"
+description = "The shared signing kernel of cairn: one signer interface over both threshold ML-DSA-65 engines, and committee rosters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+authors.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+cascade-tower = { path = "../cascade-tower" }
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+threshold-mldsa = { path = "../threshold-mldsa" }
