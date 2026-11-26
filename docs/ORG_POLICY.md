@@ -75,5 +75,7 @@ approvers, lists one key under two names, or uses a name with characters other t
   not valid makes the party refuse everything until it is fixed.
 - **Delivery is yours.** cairn does not move approval files to the parties.
 - **Clocks.** Expiry uses each party's own clock.
-- **Tested on the flat committee.** Tower signers and root engines take `--policy org` too,
-  but no test runs an organization rule on tower processes.
+- **Both engines.** Tower signers and root engines take `--policy org` too, and a test runs
+  the rule on all twenty tower processes. When too few tower nodes are left because their
+  policies refused, the signer reports the refusal in the nodes' own words, and no node is
+  dropped for refusing.

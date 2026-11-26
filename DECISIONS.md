@@ -653,3 +653,10 @@ remove someone, the old rule is the wrong one to keep using.
 party authorize a payload for that long after it first does, then never again on those
 approvals. A count of one would break ordinary signing, where a request can need several
 sessions and each asks the policy.
+
+**D-127. A tower node's policy refusal is reported, not counted as a fault.** Tower nodes
+answer a refused message with the same policy-refusal reply a committee party uses. The
+coordinator returns that reason when the refusals cost it the quorum, and it does not
+exclude a node for refusing: a node that says no to one payload must still be asked about
+the next. Found by the first test that ran `--policy org` and a policy program on tower
+processes, which got "quorum lost" with the reasons dropped.

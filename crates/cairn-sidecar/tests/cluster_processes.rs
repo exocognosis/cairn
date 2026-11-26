@@ -33,6 +33,7 @@ fn options(tag: &str, seed: [u8; 32], faults: Vec<(NodeId, FaultMode)>) -> Clust
         faults,
         link_delay_ms: 0,
         round_timeout_ms: 500,
+        node_args: Vec::new(),
     }
 }
 

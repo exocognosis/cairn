@@ -288,7 +288,7 @@ impl Handler for SignerNode {
                                     binding: ready_binding(&request.session, self.id, &self.group),
                                 }
                             }
-                            Some(reason) => refused(&reason),
+                            Some(reason) => Body::PolicyRefused { reason },
                         }
                     }
                     Body::Deal { active, roots } => self.deal(request.session, active, roots).await,
@@ -601,7 +601,7 @@ impl Handler for RootNode {
                     let refusal =
                         policy_refusal(&self.policy, session, 0, Vec::new(), message.clone());
                     if let Some(reason) = refusal.await {
-                        refused(&reason)
+                        Body::PolicyRefused { reason }
                     } else {
                         let mut sessions = self.sessions.lock().expect("root sessions");
                         if sessions.len() >= MAX_SESSIONS {

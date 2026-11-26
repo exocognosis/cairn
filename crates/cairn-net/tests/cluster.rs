@@ -180,7 +180,11 @@ async fn losing_the_quorum_is_an_error_not_a_hang() {
 async fn nodes_refuse_messages_that_are_not_checkpoints() {
     let (_cluster, mut coordinator) = cluster(56, &[]).await;
     let err = coordinator.sign(b"transfer all funds").await.err().unwrap();
-    assert!(matches!(err, NetError::QuorumLost(..)), "{err}");
+    // The refusal comes back in the nodes' own words, not as a lost quorum.
+    assert!(
+        matches!(err, NetError::Policy(ref reason) if reason.contains("not a checkpoint")),
+        "{err}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

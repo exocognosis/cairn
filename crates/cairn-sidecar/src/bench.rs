@@ -256,6 +256,7 @@ pub fn run_cluster(
         faults,
         link_delay_ms: rtt_ms / 2,
         round_timeout_ms,
+        node_args: Vec::new(),
     };
     let cluster =
         ProcessCluster::spawn(&options).map_err(|e| format!("spawning the cluster: {e}"))?;

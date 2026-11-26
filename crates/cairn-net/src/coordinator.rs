@@ -287,7 +287,7 @@ impl Coordinator {
                     ready.insert(*id);
                 }
                 Ok(Body::Ready { .. }) => faults.push(fault(*id, NetFaultKind::BadBinding)),
-                Ok(other) => faults.push(fault(*id, NetFaultKind::Refused(other.kind().into()))),
+                Ok(other) => faults.push(unexpected(*id, other)),
                 Err(f) => faults.push(f),
             }
         }
@@ -358,7 +358,7 @@ impl Coordinator {
                 Ok(Body::DealFailed { root }) => {
                     faults.push(fault(NodeId::Root(root), NetFaultKind::Undelivered))
                 }
-                Ok(other) => faults.push(fault(*id, NetFaultKind::Refused(other.kind().into()))),
+                Ok(other) => faults.push(unexpected(*id, other)),
                 Err(f) => faults.push(f),
             }
         }
@@ -397,7 +397,7 @@ impl Coordinator {
                         .map(|s| fault(s, NetFaultKind::Undelivered));
                     faults.extend(named);
                 }
-                Ok(other) => faults.push(fault(*id, NetFaultKind::Refused(other.kind().into()))),
+                Ok(other) => faults.push(unexpected(*id, other)),
                 Err(f) => faults.push(f),
             }
         }
@@ -439,7 +439,7 @@ impl Coordinator {
                         attestations.push((*k, attestation));
                     }
                 }
-                Ok(other) => faults.push(fault(*id, NetFaultKind::Refused(other.kind().into()))),
+                Ok(other) => faults.push(unexpected(*id, other)),
                 Err(f) => faults.push(f),
             }
         }
@@ -477,9 +477,7 @@ impl Coordinator {
                             kind: NetFaultKind::Unattributed(message),
                         }]))
                     }
-                    Ok(other) => {
-                        faults.push(fault(*id, NetFaultKind::Refused(other.kind().into())))
-                    }
+                    Ok(other) => faults.push(unexpected(*id, other)),
                     Err(f) => faults.push(f),
                 }
             }
@@ -520,9 +518,7 @@ impl Coordinator {
                             kind: NetFaultKind::Unattributed(message),
                         }]))
                     }
-                    Ok(other) => {
-                        faults.push(fault(*id, NetFaultKind::Refused(other.kind().into())))
-                    }
+                    Ok(other) => faults.push(unexpected(*id, other)),
                     Err(f) => faults.push(f),
                 }
             }
@@ -597,13 +593,24 @@ impl Coordinator {
             match self.session(&mut report, message, &mut attempt).await {
                 Ok(signature) => {
                     report.elapsed = start.elapsed();
+                    // A node whose policy refused this message did its job: it stays in.
                     for f in &report.faults {
-                        self.excluded.extend(f.culprit);
+                        if !matches!(f.kind, NetFaultKind::Policy(_)) {
+                            self.excluded.extend(f.culprit);
+                        }
                     }
                     return Ok((signature, report));
                 }
                 Err(SessionEnd::RejectionLimit) => return Err(NetError::RejectionLimit),
                 Err(SessionEnd::QuorumLost(what, mut faults)) => {
+                    // Too few nodes left because their policies refused: say so, in their
+                    // words.
+                    if let Some(reason) = faults.iter().find_map(|f| match &f.kind {
+                        NetFaultKind::Policy(reason) => Some(reason.clone()),
+                        _ => None,
+                    }) {
+                        return Err(NetError::Policy(reason));
+                    }
                     report.faults.append(&mut faults);
                     return Err(NetError::QuorumLost(what, report.faults));
                 }
@@ -622,6 +629,7 @@ impl Coordinator {
                     }
                     for f in &faults {
                         match f.culprit {
+                            Some(_) if matches!(f.kind, NetFaultKind::Policy(_)) => {}
                             Some(id) => {
                                 self.excluded.insert(id);
                             }
@@ -643,6 +651,18 @@ impl Coordinator {
             }
         }
     }
+}
+
+/// A reply the coordinator did not ask for, keeping the node's own reason when it gave one.
+fn unexpected(id: NodeId, body: Body) -> NetFault {
+    fault(
+        id,
+        match body {
+            Body::PolicyRefused { reason } => NetFaultKind::Policy(reason),
+            Body::Refused { reason } => NetFaultKind::Refused(reason),
+            other => NetFaultKind::Refused(other.kind().into()),
+        },
+    )
 }
 
 enum SessionEnd {

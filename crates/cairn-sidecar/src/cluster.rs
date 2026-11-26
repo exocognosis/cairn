@@ -104,6 +104,8 @@ pub struct ClusterOptions {
     /// One-way injected latency on every node, milliseconds.
     pub link_delay_ms: u64,
     pub round_timeout_ms: u64,
+    /// Extra flags for every signer and root engine, such as `--policy org`.
+    pub node_args: Vec<String>,
 }
 
 /// A cluster of real OS processes on loopback: 16 signers, 4 root engines, 1 MPC worker.
@@ -202,7 +204,8 @@ impl ProcessCluster {
                 .arg(&cluster.tls_dir)
                 .args(["--fault", fault_name(fault)])
                 .args(["--link-delay-ms", &opts.link_delay_ms.to_string()])
-                .args(["--round-timeout-ms", &opts.round_timeout_ms.to_string()]);
+                .args(["--round-timeout-ms", &opts.round_timeout_ms.to_string()])
+                .args(&opts.node_args);
             match id {
                 NodeId::Root(_) => cmd.arg("--mpc-socket-dir").arg(&cluster.socket_dir),
                 _ => cmd.arg("--share").arg(share_file(&keys, *id)),
