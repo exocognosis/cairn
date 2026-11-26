@@ -70,7 +70,9 @@ latency and maturity favour the flat protocol.
   roles, single-use approvals and approver revocation do not exist.
 - **The tower's CLI nodes always run the checkpoint format check.** `SignerNode` and
   `RootNode` take any `PolicyEngine` in code; no flag selects one.
-- **Roster providers for chains or directories**, and a path from a roster to a running
-  committee: today key generation takes `T` and `N` directly.
+- **Roster providers for chains or directories.** `cairn keygen` and `cairn committee-init`
+  take a roster file (`--members`) and record which member is which party in
+  `members.json`. Nothing reads a roster from a chain or a directory service, and a changed
+  roster does not change a running committee (that needs resharing).
 - **Other front ends** (PKCS#11, KMIP, gRPC, peer-to-peer). `cairn-gateway` has the KMS API
   only, and it depends on `cairn-net` for its TLS listener.

@@ -585,3 +585,9 @@ separates it from every other signature in the system.
 **D-114. No audit line, no signature.** With an audit log configured, the organization
 policy refuses when the line cannot be written and synced. An unrecorded authorisation is
 the failure an audit log exists to prevent.
+
+**D-115. A roster sets the committee at key generation, by position.** `--members
+<roster.json>` on `keygen` and `committee-init` takes T and N from the roster and makes party
+`k` its `k`-th member; `members.json` records that, with each member's DKG identity key when
+`committee-init` made one. The flag is not called `--roster` because the DKG commands already
+use that name for their list of identity keys.

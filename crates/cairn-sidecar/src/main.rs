@@ -51,6 +51,11 @@ Multi-process cluster:
       An approver's key, and one approval of one payload for one committee. Copy the
       approval file into every party's approvals directory.
   cairn keygen --out <dir> --committee <T-of-N>      (flat committee, TRUSTED DEALER; tests only)
+  cairn keygen --out <dir> --members <roster.json>   (the same, shape taken from a roster)
+      A roster names the committee: a threshold and a list of members, each with an id and
+      weight 1. Party k is the k-th member; members.json in <dir> records that. The same
+      flag works for committee-init. Weighted or larger rosters are refused: the
+      three-round protocol has no weights and at most six parties.
   cairn identity --out <file>                         (a party's long-term identity key)
   cairn dkg-party --id party_<k> --bind <addr:port> --roster <roster.json> --identity <file>
                   --tls <dir> --out <dir>
@@ -113,6 +118,50 @@ fn arg(args: &[String], name: &str) -> Option<String> {
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1))
         .cloned()
+}
+
+/// The committee's shape, from `--members <file>` (a roster: who is on the committee) or
+/// `--committee T-of-N`. With a roster, party `k` is its `k`-th member.
+fn committee_shape(
+    args: &[String],
+) -> Result<(usize, usize, Option<cairn_core::Roster>, String), String> {
+    use cairn_core::RosterProvider as _;
+    match (arg(args, "--members"), arg(args, "--committee")) {
+        (Some(_), Some(_)) => Err("give --members or --committee, not both".into()),
+        (Some(file), None) => {
+            let roster = cairn_core::FileRoster(PathBuf::from(file))
+                .roster()
+                .map_err(|e| e.to_string())?;
+            let (t, n) = roster.flat_shape().map_err(|e| e.to_string())?;
+            Ok((t, n, Some(roster), format!("{t}-of-{n}")))
+        }
+        (None, Some(spec)) => {
+            let (t, n) = spec
+                .split_once("-of-")
+                .and_then(|(t, n)| Some((t.parse::<usize>().ok()?, n.parse::<usize>().ok()?)))
+                .ok_or("--committee expects T-of-N, for example 3-of-4")?;
+            Ok((t, n, None, spec))
+        }
+        (None, None) => Err("needs --committee T-of-N or --members <roster.json>".into()),
+    }
+}
+
+/// Record which member is which party: `members.json` beside the keys.
+fn write_members(out: &std::path::Path, roster: &cairn_core::Roster) -> Result<(), String> {
+    let members: Vec<serde_json::Value> = roster
+        .members
+        .iter()
+        .enumerate()
+        .map(|(k, m)| {
+            json!({ "node": format!("party_{}", k + 1), "id": m.id, "public_key": m.public_key, "weight": m.weight })
+        })
+        .collect();
+    std::fs::write(
+        out.join("members.json"),
+        serde_json::to_string_pretty(&json!({ "threshold": roster.threshold, "members": members }))
+            .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn read_public_key(
@@ -424,12 +473,10 @@ fn run(args: &[String]) -> Result<(), String> {
             let base: u16 = arg(args, "--base-port")
                 .map_or(Ok(7100), |v| v.parse())
                 .map_err(|_| "bad --base-port")?;
-            if let Some(spec) = arg(args, "--committee") {
-                // A flat committee for the three-round protocol: "--committee 3-of-4".
-                let (t, n) = spec
-                    .split_once("-of-")
-                    .and_then(|(t, n)| Some((t.parse::<usize>().ok()?, n.parse::<usize>().ok()?)))
-                    .ok_or("--committee expects T-of-N, for example 3-of-4")?;
+            if arg(args, "--committee").is_some() || arg(args, "--members").is_some() {
+                // A flat committee for the three-round protocol: "--committee 3-of-4", or
+                // a roster naming its members.
+                let (t, n, roster, spec) = committee_shape(args)?;
                 let (key, parties) = threshold_mldsa::mithril::keygen(t, n, &mut OsRng)
                     .ok_or("no parameter set for that committee (N at most 6)")?;
                 cairn_net::flat::write_flat_keys(&out, &key, &parties)
@@ -439,6 +486,9 @@ fn run(args: &[String]) -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
                 write_public_key(&out.join("public_key.hex"), &key.pk)
                     .map_err(|e| e.to_string())?;
+                if let Some(roster) = &roster {
+                    write_members(&out, roster)?;
+                }
                 println!(
                     "{}",
                     json!({ "out": out, "committee": spec, "nodes": peers.len(), "key_id": hex::encode(cairn_sidecar::key_id(&key.pk)) })
@@ -1145,11 +1195,11 @@ fn run(args: &[String]) -> Result<(), String> {
             // Local and test convenience: one machine makes every identity and the TLS
             // certificates. It never makes the signing key; `cairn dkg` does that jointly.
             let out = PathBuf::from(arg(args, "--out").ok_or("committee-init needs --out <dir>")?);
-            let spec = arg(args, "--committee").ok_or("committee-init needs --committee T-of-N")?;
-            let (t, n) = spec
-                .split_once("-of-")
-                .and_then(|(t, n)| Some((t.parse::<u8>().ok()?, n.parse::<usize>().ok()?)))
-                .ok_or("--committee expects T-of-N, for example 3-of-4")?;
+            let (t, n, mut members, spec) = committee_shape(args)?;
+            if threshold_mldsa::mithril::params_65(t, n).is_none() {
+                return Err("no parameter set for that committee (N at most 6)".into());
+            }
+            let t = t as u8;
             let host = arg(args, "--host").unwrap_or_else(|| "127.0.0.1".into());
             let base: u16 = arg(args, "--base-port")
                 .map_or(Ok(7300), |v| v.parse())
@@ -1168,7 +1218,14 @@ fn run(args: &[String]) -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
                 std::io::Write::write_all(&mut f, identity.to_pkcs8())
                     .map_err(|e| e.to_string())?;
+                // The roster's key for a member is the identity made for it here.
+                if let Some(member) = members.as_mut().map(|r| &mut r.members[k - 1]) {
+                    member.public_key = hex::encode(identity.public());
+                }
                 identities.push(identity.public());
+            }
+            if let Some(roster) = &members {
+                write_members(&out, roster)?;
             }
             let roster = cairn_net::dkg::Roster {
                 threshold: t,
