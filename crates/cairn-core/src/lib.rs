@@ -11,7 +11,8 @@
 //!   [`Backend::Tower`], the two-tier tower with a root engine), as do the networked
 //!   coordinators built on them in other crates.
 //! * [`Roster`] and [`RosterProvider`]: who is on the committee, with weights, wherever that
-//!   list comes from.
+//!   list comes from: a file ([`FileRoster`]) or any program that prints one
+//!   ([`CommandRoster`]).
 //! * [`verify`]: the standard FIPS 204 check.
 
 pub mod local;
@@ -19,7 +20,9 @@ pub mod roster;
 pub mod signer;
 
 pub use local::{LocalFlat, LocalTower};
-pub use roster::{FileRoster, Member, Roster, RosterError, RosterProvider, StaticRoster};
+pub use roster::{
+    CommandRoster, FileRoster, Member, Roster, RosterError, RosterProvider, StaticRoster,
+};
 pub use signer::{Backend, SignerError, ThresholdSigner};
 pub use threshold_mldsa::{PUBLIC_KEY_BYTES, SIGNATURE_BYTES};
 

@@ -591,3 +591,20 @@ the failure an audit log exists to prevent.
 `k` its `k`-th member; `members.json` records that, with each member's DKG identity key when
 `committee-init` made one. The flag is not called `--roster` because the DKG commands already
 use that name for their list of identity keys.
+
+**D-116. Hooks, not adapters.** cairn will not contain code for a particular chain,
+directory or rule system. The three places deployments differ (what a party signs, who is on
+the committee, how a signature is asked for) each accept a program or local service the
+operator owns: `CommandPolicy`, `WebhookPolicy`, `CommandRoster`, and the `cairn sign`
+command. One integration per chain inside cairn would never cover "all chains" and would put
+each chain's client code inside the signing parties.
+
+**D-117. A hook answers yes or it is a refusal.** A missing program, a non-zero exit, a
+timeout, a non-200 status, an answer that is not JSON or not `true`: all refuse. The webhook
+uses the request and answer shapes of Open Policy Agent's data API so OPA needs no shim, and
+accepts only loopback IP addresses because the call is plain HTTP and the hook is as trusted
+as the party.
+
+**D-118. External checks run before the stateful policy.** With `AllOf`, the hook is asked
+first and the checkpoint rules last, so a party records a height only for a checkpoint its
+own finality check accepted.

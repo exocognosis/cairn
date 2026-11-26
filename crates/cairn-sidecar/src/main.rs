@@ -45,6 +45,20 @@ Multi-process cluster:
       height. org: any payload that enough of the approvers in rule.json have approved
       (rule.json holds a required count and each approver's name and public key hex; see
       docs/ORG_POLICY.md); the party reads approvals from its own --approvals directory.
+             also, with any policy: [--policy-command '<program> [args]']
+                                    [--policy-url http://127.0.0.1:<port>/<path>] [--policy-timeout-ms <n>]
+      An extra check by a program or local service you own, asked before the policy above;
+      --policy hook makes it the only check. The program gets the request as JSON on
+      standard input and allows by exiting 0. The service gets the request by POST and answers allow or
+      refuse in the shape Open Policy Agent uses. This is where a
+      chain's finality check or an organization's rule system attaches. See docs/HOOKS.md.
+  cairn sign --peers <peers.json> --committee <committee.bin> --tls <dir>
+             (--payload <file> | --chain <caip2> --height <n> --block-hash <hex> [--epoch <n>]
+              [--finality <hex>] [--certificate-out <file.pqcc>]) [--signature-out <file>]
+      One signature through a running committee: any bytes, or a checkpoint given by its
+      fields for any chain. Prints the message and signature as JSON.
+  cairn keygen ... --members-command '<program> [args]'
+      As --members, the roster being whatever the program prints (JSON).
   cairn approver-keygen --name <approver> --out <dir>
   cairn approve --name <approver> --key <name.approver.key> --committee-key <public_key.hex>
                 --payload <file> --out <approvals dir> [--ttl-secs <n>]   (default one hour)
@@ -126,23 +140,36 @@ fn committee_shape(
     args: &[String],
 ) -> Result<(usize, usize, Option<cairn_core::Roster>, String), String> {
     use cairn_core::RosterProvider as _;
-    match (arg(args, "--members"), arg(args, "--committee")) {
-        (Some(_), Some(_)) => Err("give --members or --committee, not both".into()),
-        (Some(file), None) => {
-            let roster = cairn_core::FileRoster(PathBuf::from(file))
-                .roster()
-                .map_err(|e| e.to_string())?;
-            let (t, n) = roster.flat_shape().map_err(|e| e.to_string())?;
-            Ok((t, n, Some(roster), format!("{t}-of-{n}")))
+    let from_roster = |roster: Result<cairn_core::Roster, cairn_core::RosterError>| {
+        let roster = roster.map_err(|e| e.to_string())?;
+        let (t, n) = roster.flat_shape().map_err(|e| e.to_string())?;
+        Ok((t, n, Some(roster), format!("{t}-of-{n}")))
+    };
+    match (
+        arg(args, "--members"),
+        arg(args, "--members-command"),
+        arg(args, "--committee"),
+    ) {
+        (Some(file), None, None) => {
+            from_roster(cairn_core::FileRoster(PathBuf::from(file)).roster())
         }
-        (None, Some(spec)) => {
+        (None, Some(line), None) => from_roster(
+            cairn_core::CommandRoster::parse(&line)
+                .ok_or("--members-command is empty")?
+                .roster(),
+        ),
+        (None, None, Some(spec)) => {
             let (t, n) = spec
                 .split_once("-of-")
                 .and_then(|(t, n)| Some((t.parse::<usize>().ok()?, n.parse::<usize>().ok()?)))
                 .ok_or("--committee expects T-of-N, for example 3-of-4")?;
             Ok((t, n, None, spec))
         }
-        (None, None) => Err("needs --committee T-of-N or --members <roster.json>".into()),
+        (None, None, None) => Err(
+            "needs --committee T-of-N, --members <roster.json> or --members-command <program>"
+                .into(),
+        ),
+        _ => Err("give one of --members, --members-command and --committee, not both".into()),
     }
 }
 
@@ -473,7 +500,10 @@ fn run(args: &[String]) -> Result<(), String> {
             let base: u16 = arg(args, "--base-port")
                 .map_or(Ok(7100), |v| v.parse())
                 .map_err(|_| "bad --base-port")?;
-            if arg(args, "--committee").is_some() || arg(args, "--members").is_some() {
+            if ["--committee", "--members", "--members-command"]
+                .iter()
+                .any(|flag| arg(args, flag).is_some())
+            {
                 // A flat committee for the three-round protocol: "--committee 3-of-4", or
                 // a roster naming its members.
                 let (t, n, roster, spec) = committee_shape(args)?;
@@ -583,9 +613,36 @@ fn run(args: &[String]) -> Result<(), String> {
                             );
                             Box::new(cairn_policy::OrgGovernancePolicy::new(&key.pk, config)?)
                         }
+                        Some("hook") => Box::new(cairn_policy::Unrestricted),
                         Some(other) => {
-                            return Err(format!("unknown --policy {other:?} (checkpoint or org)"))
+                            return Err(format!(
+                                "unknown --policy {other:?} (checkpoint, org or hook)"
+                            ))
                         }
+                    };
+                    // External checks the operator attached. They are asked first, so a policy
+                    // that remembers what it signed records only what they allowed.
+                    let hook_timeout = Duration::from_millis(ms(args, "--policy-timeout-ms", 2000)?);
+                    let mut checks: Vec<Box<dyn cairn_policy::PolicyEngine>> = Vec::new();
+                    if let Some(line) = arg(args, "--policy-command") {
+                        checks.push(Box::new(
+                            cairn_policy::CommandPolicy::parse(&line, hook_timeout)
+                                .ok_or("--policy-command is empty")?,
+                        ));
+                        eprintln!("cairn node {id}: every request is also put to the command {line:?}");
+                    }
+                    if let Some(url) = arg(args, "--policy-url") {
+                        checks.push(Box::new(cairn_policy::WebhookPolicy::new(&url, hook_timeout)?));
+                        eprintln!("cairn node {id}: every request is also put to {url}");
+                    }
+                    if checks.is_empty() && arg(args, "--policy").as_deref() == Some("hook") {
+                        return Err("--policy hook needs --policy-command or --policy-url".into());
+                    }
+                    let policy: Box<dyn cairn_policy::PolicyEngine> = if checks.is_empty() {
+                        policy
+                    } else {
+                        checks.push(policy);
+                        Box::new(cairn_policy::AllOf(checks))
                     };
                     let mut node = cairn_net::PartyNode::new(
                         id,
@@ -1083,6 +1140,87 @@ fn run(args: &[String]) -> Result<(), String> {
                 cairn_net::failover::relay(listener, backends, timeout).await;
                 Ok(())
             })
+        }
+        Some("sign") => {
+            // One signature through a running committee, for any caller that can start a
+            // program: a chain watcher in any language, a release pipeline, a script.
+            let key = Arc::new(
+                cairn_net::flat::read_committee(&PathBuf::from(
+                    arg(args, "--committee").ok_or("sign needs --committee <committee.bin>")?,
+                ))
+                .map_err(|e| e.to_string())?,
+            );
+            let peers = peers(args)?.ok_or("sign needs --peers")?;
+            let checkpoint = match arg(args, "--chain") {
+                None => None,
+                Some(chain) => {
+                    let number = |flag: &str| -> Result<u64, String> {
+                        arg(args, flag)
+                            .ok_or(format!("a checkpoint needs {flag} <n>"))?
+                            .parse()
+                            .map_err(|_| format!("bad {flag}"))
+                    };
+                    let bytes = |flag: &str| -> Result<Vec<u8>, String> {
+                        let text =
+                            arg(args, flag).ok_or(format!("a checkpoint needs {flag} <hex>"))?;
+                        hex::decode(text.trim_start_matches("0x"))
+                            .map_err(|_| format!("{flag} is not hex"))
+                    };
+                    Some(cairn_sidecar::Checkpoint {
+                        chain,
+                        epoch: arg(args, "--epoch")
+                            .map_or(Ok(0), |v| v.parse())
+                            .map_err(|_| "bad --epoch")?,
+                        height: number("--height")?,
+                        block_hash: bytes("--block-hash")?,
+                        finality_commitment: arg(args, "--finality")
+                            .map_or(Ok(Vec::new()), |_| bytes("--finality"))?,
+                    })
+                }
+            };
+            let key_id = cairn_sidecar::key_id(&key.pk);
+            let message = match (&checkpoint, arg(args, "--payload")) {
+                (Some(checkpoint), None) => checkpoint
+                    .signing_message(&key_id)
+                    .map_err(|e| e.to_string())?,
+                (None, Some(path)) => std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?,
+                _ => {
+                    return Err(
+                        "sign needs --payload <file>, or --chain with --height and --block-hash"
+                            .into(),
+                    )
+                }
+            };
+            let policy = NetPolicy {
+                round_timeout: Duration::from_millis(ms(args, "--round-timeout-ms", 5000)?),
+                parallel_attempts: ms(args, "--parallel-attempts", 2)? as usize,
+                ..NetPolicy::default()
+            };
+            let mut signer = cairn_sidecar::cluster::CommitteeSigner::new(
+                key.clone(),
+                peers,
+                policy,
+                tls(args, NodeId::Coordinator)?,
+            )
+            .map_err(|e| e.to_string())?;
+            let (signature, _) = signer.sign_with_report(&message)?;
+            if let Some(path) = arg(args, "--signature-out") {
+                std::fs::write(&path, signature).map_err(|e| format!("{path}: {e}"))?;
+            }
+            if let (Some(path), Some(checkpoint)) = (arg(args, "--certificate-out"), checkpoint) {
+                let certificate = cairn_sidecar::Certificate {
+                    checkpoint,
+                    key_id,
+                    signature: Box::new(signature),
+                };
+                std::fs::write(&path, certificate.to_bytes().map_err(|e| e.to_string())?)
+                    .map_err(|e| format!("{path}: {e}"))?;
+            }
+            println!(
+                "{}",
+                json!({ "key_id": hex::encode(key_id), "message_hex": hex::encode(&message), "signature_hex": hex::encode(signature) })
+            );
+            Ok(())
         }
         Some("approver-keygen") => {
             use std::os::unix::fs::OpenOptionsExt;

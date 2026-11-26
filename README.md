@@ -169,6 +169,7 @@ the live sidecar flow and two-host deployment.
 | Why each design choice was made (65 entries) | [DECISIONS.md](DECISIONS.md) |
 | How the kernel, policy and front-end layers fit, and what each may know | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | Signing for an organization: approvals instead of checkpoints | [docs/ORG_POLICY.md](docs/ORG_POLICY.md) |
+| Attaching any chain or organization: policy hooks, roster commands, `cairn sign` | [docs/HOOKS.md](docs/HOOKS.md) |
 | Everything that still blocks production use, with status | [docs/BLOCKERS.md](docs/BLOCKERS.md) |
 | Backup, certificate rotation, standby coordinator, monitoring, upgrades | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
 | Why cairn's additions to the protocol should be safe, and where that argument stops | [docs/SECURITY_ARGUMENT.md](docs/SECURITY_ARGUMENT.md) |

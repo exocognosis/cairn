@@ -43,11 +43,14 @@ fn authorize_sign(&self, ctx: &SignContext, payload: &[u8]) -> Result<(), Policy
 |---|---|
 | `PosCheckpointPolicy` | A well-formed checkpoint for this key, on a served chain, never below or conflicting with one already signed (state on disk before answering) |
 | `OrgGovernancePolicy` | Any payload that enough named approvers approved for this committee, unexpired; the decision is logged first. See [ORG_POLICY.md](ORG_POLICY.md) |
+| `CommandPolicy`, `WebhookPolicy` | Whatever a program or local service the operator owns answers. How a chain's finality check or a rule system attaches. See [HOOKS.md](HOOKS.md) |
+| `AllOf` | Every listed policy agrees |
 | `pos::CheckpointPrefix` | The payload starts with the checkpoint domain. The tower nodes' default |
 | `Unrestricted` | Anything. Protects nothing by itself |
 
 **`cairn_core::RosterProvider`**: who is on the committee, with weights. `StaticRoster` and
-`FileRoster` (JSON, re-read on every call) exist. `Roster::flat_shape` says whether the flat
+`FileRoster` (JSON, re-read on every call) and `CommandRoster` (whatever a program prints)
+exist. `Roster::flat_shape` says whether the flat
 backend can serve a roster: only unweighted ones it has parameters for (up to six members).
 
 ## Choosing a backend
@@ -70,9 +73,8 @@ latency and maturity favour the flat protocol.
   roles, single-use approvals and approver revocation do not exist.
 - **The tower's CLI nodes always run the checkpoint format check.** `SignerNode` and
   `RootNode` take any `PolicyEngine` in code; no flag selects one.
-- **Roster providers for chains or directories.** `cairn keygen` and `cairn committee-init`
-  take a roster file (`--members`) and record which member is which party in
-  `members.json`. Nothing reads a roster from a chain or a directory service, and a changed
-  roster does not change a running committee (that needs resharing).
+- **No built-in integrations, by design.** A chain's validator set, a directory, a finality
+  check or a rule system attaches through a command or local service ([HOOKS.md](HOOKS.md)).
+  A changed roster does not change a running committee (that needs resharing).
 - **Other front ends** (PKCS#11, KMIP, gRPC, peer-to-peer). `cairn-gateway` has the KMS API
   only, and it depends on `cairn-net` for its TLS listener.

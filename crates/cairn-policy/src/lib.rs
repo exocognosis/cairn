@@ -7,15 +7,21 @@
 //! * [`PosCheckpointPolicy`] ([`pos`]): proof-of-stake checkpoints. The message must be a
 //!   well-formed pqc-sidecar checkpoint for this committee's key, and never conflict with one
 //!   already signed.
+//! * [`CommandPolicy`], [`WebhookPolicy`] ([`hook`]): ask a program or a local service the
+//!   operator owns. This is how a particular chain's finality check or an organization's
+//!   policy system is attached without cairn containing code for it. [`AllOf`] requires
+//!   several policies at once.
 //! * [`Unrestricted`]: signs anything. For tests, and for deployments that enforce their rules
 //!   somewhere the parties trust. It protects nothing by itself.
 //!
 //! * [`OrgGovernancePolicy`] ([`org`]): an organization's approvals. A payload is signed once
 //!   enough named approvers have signed off on it, and every decision is logged.
 
+pub mod hook;
 pub mod org;
 pub mod pos;
 
+pub use hook::{AllOf, CommandPolicy, WebhookPolicy};
 pub use org::OrgGovernancePolicy;
 pub use pos::PosCheckpointPolicy;
 

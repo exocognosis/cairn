@@ -131,6 +131,45 @@ impl RosterProvider for FileRoster {
     }
 }
 
+/// A roster printed by a program the operator owns: it reads a chain's validator set, a
+/// directory, a configuration repository, whatever holds the membership, and writes the
+/// roster as JSON on standard output. cairn has no code for any particular source. The
+/// program is run directly (no shell) on every call.
+pub struct CommandRoster {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+impl CommandRoster {
+    /// Split `"program arg arg"` on whitespace.
+    pub fn parse(line: &str) -> Option<Self> {
+        let mut words = line.split_whitespace().map(str::to_owned);
+        Some(Self {
+            program: words.next()?,
+            args: words.collect(),
+        })
+    }
+}
+
+impl RosterProvider for CommandRoster {
+    fn roster(&self) -> Result<Roster, RosterError> {
+        let source = |what: String| RosterError::Source(format!("{}: {what}", self.program));
+        let output = std::process::Command::new(&self.program)
+            .args(&self.args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .output()
+            .map_err(|e| source(e.to_string()))?;
+        if !output.status.success() {
+            return Err(source(format!("exited with {}", output.status)));
+        }
+        let roster: Roster = serde_json::from_slice(&output.stdout)
+            .map_err(|e| source(format!("output is not a roster: {e}")))?;
+        roster.validate()?;
+        Ok(roster)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +216,31 @@ mod tests {
         std::fs::write(&path, r#"{"threshold":9,"members":[{"id":"a"}]}"#).unwrap();
         assert!(matches!(provider.roster(), Err(RosterError::Invalid(_))));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_command_roster_is_whatever_the_program_prints() {
+        let sh = |script: &str| CommandRoster {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+        };
+        let printed = sh(r#"echo '{"threshold":3,"members":[{"id":"v1"},{"id":"v2"},{"id":"v3"},{"id":"v4","weight":5}]}'"#)
+            .roster()
+            .unwrap();
+        assert_eq!((printed.threshold, printed.total_weight()), (3, 8));
+        assert!(matches!(sh("exit 2").roster(), Err(RosterError::Source(_))));
+        assert!(matches!(
+            sh("echo nonsense").roster(),
+            Err(RosterError::Source(_))
+        ));
+        assert!(matches!(
+            sh(r#"echo '{"threshold":5,"members":[{"id":"v1"}]}'"#).roster(),
+            Err(RosterError::Invalid(_))
+        ));
+        assert!(CommandRoster::parse("/nonexistent/roster-source")
+            .unwrap()
+            .roster()
+            .is_err());
+        assert!(CommandRoster::parse(" ").is_none());
     }
 }
