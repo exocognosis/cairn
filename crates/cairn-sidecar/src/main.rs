@@ -38,6 +38,18 @@ Multi-process cluster:
              [--share <file>]            (signer)
              [--mpc-socket-dir <dir>]    (root: MPC backend party sockets)
              [--round-timeout-ms <n>] [--mpc-timeout-ms <n>] [--link-delay-ms <n>] [--fault <mode>]
+  cairn node --role party ... [--policy checkpoint|org]
+             checkpoint (default): [--chains <caip2,...>] [--state <file>] [--audit-log <file>]
+             org: --org-rule <rule.json> --approvals <dir> [--audit-log <file>]
+      What this party agrees to sign. checkpoint: pqc-sidecar checkpoints, never two for one
+      height. org: any payload that enough of the approvers in rule.json have approved
+      (rule.json holds a required count and each approver's name and public key hex; see
+      docs/ORG_POLICY.md); the party reads approvals from its own --approvals directory.
+  cairn approver-keygen --name <approver> --out <dir>
+  cairn approve --name <approver> --key <name.approver.key> --committee-key <public_key.hex>
+                --payload <file> --out <approvals dir> [--ttl-secs <n>]   (default one hour)
+      An approver's key, and one approval of one payload for one committee. Copy the
+      approval file into every party's approvals directory.
   cairn keygen --out <dir> --committee <T-of-N>      (flat committee, TRUSTED DEALER; tests only)
   cairn identity --out <file>                         (a party's long-term identity key)
   cairn dkg-party --id party_<k> --bind <addr:port> --roster <roster.json> --identity <file>
@@ -480,19 +492,51 @@ fn run(args: &[String]) -> Result<(), String> {
                         .await
                         .map_err(|e| format!("bind {bind}: {e}"))?;
                     eprintln!("cairn node {id}: committee party on {bind}");
-                    let policy = cairn_net::policy::Policy::open(
-                        &key.pk,
-                        cairn_net::policy::PolicyConfig {
-                            chains: arg(args, "--chains").map(|c| c.split(',').map(|x| x.trim().to_owned()).collect()),
-                            state_file: arg(args, "--state").map(PathBuf::from),
-                            audit_log: arg(args, "--audit-log").map(PathBuf::from),
-                        },
-                    )
-                    .map_err(|e| format!("signing policy state: {e}"))?;
-                    let policy = cairn_policy::PosCheckpointPolicy::from(policy);
-                    if arg(args, "--state").is_none() {
-                        eprintln!("cairn node {id}: no --state file; the last signed height is forgotten on restart");
-                    }
+                    let audit_log = arg(args, "--audit-log").map(PathBuf::from);
+                    let policy: Box<dyn cairn_policy::PolicyEngine> = match arg(args, "--policy")
+                        .as_deref()
+                    {
+                        None | Some("checkpoint") => {
+                            let policy = cairn_net::policy::Policy::open(
+                                &key.pk,
+                                cairn_net::policy::PolicyConfig {
+                                    chains: arg(args, "--chains").map(|c| {
+                                        c.split(',').map(|x| x.trim().to_owned()).collect()
+                                    }),
+                                    state_file: arg(args, "--state").map(PathBuf::from),
+                                    audit_log,
+                                },
+                            )
+                            .map_err(|e| format!("signing policy state: {e}"))?;
+                            if arg(args, "--state").is_none() {
+                                eprintln!("cairn node {id}: no --state file; the last signed height is forgotten on restart");
+                            }
+                            Box::new(cairn_policy::PosCheckpointPolicy::from(policy))
+                        }
+                        Some("org") => {
+                            let rule = arg(args, "--org-rule")
+                                .ok_or("--policy org needs --org-rule <rule.json>")?;
+                            let approvals = arg(args, "--approvals")
+                                .ok_or("--policy org needs --approvals <dir>")?;
+                            if audit_log.is_none() {
+                                eprintln!("cairn node {id}: no --audit-log; approval decisions are not recorded");
+                            }
+                            let config = cairn_policy::org::OrgConfig::load(
+                                &PathBuf::from(rule),
+                                PathBuf::from(approvals),
+                                audit_log,
+                            )?;
+                            eprintln!(
+                                "cairn node {id}: organization policy, {} of {} approvers",
+                                config.required,
+                                config.approvers.len()
+                            );
+                            Box::new(cairn_policy::OrgGovernancePolicy::new(&key.pk, config)?)
+                        }
+                        Some(other) => {
+                            return Err(format!("unknown --policy {other:?} (checkpoint or org)"))
+                        }
+                    };
                     let mut node = cairn_net::PartyNode::new(
                         id,
                         Arc::new(key),
@@ -554,6 +598,7 @@ fn run(args: &[String]) -> Result<(), String> {
                                 peers,
                                 link,
                                 fault,
+                                policy: cairn_net::node::default_policy(),
                             },
                             delay,
                         )
@@ -988,6 +1033,71 @@ fn run(args: &[String]) -> Result<(), String> {
                 cairn_net::failover::relay(listener, backends, timeout).await;
                 Ok(())
             })
+        }
+        Some("approver-keygen") => {
+            use std::os::unix::fs::OpenOptionsExt;
+            let name = arg(args, "--name").ok_or("approver-keygen needs --name <approver>")?;
+            let out = PathBuf::from(arg(args, "--out").ok_or("approver-keygen needs --out <dir>")?);
+            let seed: [u8; 32] = rand::random();
+            let key = cairn_policy::org::ApproverKey::from_seed(&name, &seed)
+                .ok_or("approver names use a-z, 0-9, - and _ only")?;
+            std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+            let (secret, public) = (
+                out.join(format!("{name}.approver.key")),
+                out.join(format!("{name}.approver.pub")),
+            );
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&secret)
+                .map_err(|e| format!("{}: {e}", secret.display()))?;
+            use std::io::Write as _;
+            writeln!(f, "{}", hex::encode(seed)).map_err(|e| e.to_string())?;
+            std::fs::write(&public, format!("{}\n", hex::encode(key.public_key())))
+                .map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                json!({ "approver": name, "key": secret, "public_key": public })
+            );
+            Ok(())
+        }
+        Some("approve") => {
+            let name = arg(args, "--name").ok_or("approve needs --name <approver>")?;
+            let read = |flag: &str| -> Result<Vec<u8>, String> {
+                let path = arg(args, flag).ok_or(format!("approve needs {flag} <file>"))?;
+                std::fs::read(&path).map_err(|e| format!("{path}: {e}"))
+            };
+            let seed: [u8; 32] = std::str::from_utf8(&read("--key")?)
+                .ok()
+                .and_then(|text| hex::decode(text.trim()).ok())
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or("--key is not an approver key file")?;
+            let committee = read_public_key(&PathBuf::from(
+                arg(args, "--committee-key")
+                    .ok_or("approve needs --committee-key <public_key.hex>")?,
+            ))?;
+            let payload = read("--payload")?;
+            let out =
+                PathBuf::from(arg(args, "--out").ok_or("approve needs --out <approvals dir>")?);
+            let ttl: u64 = arg(args, "--ttl-secs")
+                .map_or(Ok(3600), |v| v.parse())
+                .map_err(|_| "bad --ttl-secs")?;
+            let not_after = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_secs()
+                + ttl;
+            let approval = cairn_policy::org::ApproverKey::from_seed(&name, &seed)
+                .ok_or("approver names use a-z, 0-9, - and _ only")?
+                .approve(&committee, &payload, not_after);
+            std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+            let path = approval.write(&out).map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                json!({ "approver": name, "payload_sha3": hex::encode(approval.payload_sha3), "not_after": not_after, "file": path })
+            );
+            Ok(())
         }
         Some("kms-cert") => {
             use std::os::unix::fs::OpenOptionsExt;

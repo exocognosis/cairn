@@ -188,6 +188,7 @@ impl LocalCluster {
                         peers: peers.clone(),
                         link: Link::new(round_timeout, delay, Arc::new(tls.identity(id)?)),
                         fault: fault(id),
+                        policy: crate::node::default_policy(),
                     };
                     tokio::spawn(run_signer(listener, node, delay))
                 }

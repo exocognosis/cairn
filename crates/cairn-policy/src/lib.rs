@@ -10,11 +10,13 @@
 //! * [`Unrestricted`]: signs anything. For tests, and for deployments that enforce their rules
 //!   somewhere the parties trust. It protects nothing by itself.
 //!
-//! An organization's rules (approvals, limits, roles) are another implementation of the same
-//! trait; none ships yet.
+//! * [`OrgGovernancePolicy`] ([`org`]): an organization's approvals. A payload is signed once
+//!   enough named approvers have signed off on it, and every decision is logged.
 
+pub mod org;
 pub mod pos;
 
+pub use org::OrgGovernancePolicy;
 pub use pos::PosCheckpointPolicy;
 
 /// What a party knows about a signing request besides the payload.
@@ -22,9 +24,10 @@ pub use pos::PosCheckpointPolicy;
 pub struct SignContext<'a> {
     /// The signing session's identifier.
     pub session: &'a [u8; 32],
-    /// This party's index in the committee.
+    /// This party's index in the committee (zero where the transport has no such index).
     pub party: u8,
-    /// The indices asked to sign together, this party included.
+    /// The indices asked to sign together, this party included. Empty when the party is not
+    /// told at the point it decides.
     pub signers: &'a [u8],
 }
 

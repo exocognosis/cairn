@@ -25,8 +25,8 @@ use threshold_mldsa::{AdditiveShare, GroupPublic, KeyShare, Path};
 /// Address book: where each node listens.
 pub type Peers = BTreeMap<NodeId, String>;
 
-/// Messages a node agrees to sign must be pqc-sidecar checkpoint messages.
-pub const CHECKPOINT_DOMAIN: &[u8] = b"pqc-sidecar/checkpoint/v2";
+pub use cairn_policy::pos::CHECKPOINT_DOMAIN;
+use cairn_policy::{PolicyEngine, SignContext};
 
 /// Scripted deviations, for tests, benchmarks and drills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -82,8 +82,22 @@ fn refused(reason: &str) -> Body {
     }
 }
 
-fn message_allowed(message: &[u8]) -> bool {
-    message.starts_with(CHECKPOINT_DOMAIN)
+/// What the node's policy says about `message`, as a refusal reason.
+fn policy_refusal(policy: &dyn PolicyEngine, session: &[u8; 32], message: &[u8]) -> Option<String> {
+    let ctx = SignContext {
+        session,
+        party: 0,
+        signers: &[],
+    };
+    policy
+        .authorize_sign(&ctx, message)
+        .err()
+        .map(|refused| refused.to_string())
+}
+
+/// The policy tower nodes run unless given another: the checkpoint format check.
+pub fn default_policy() -> Arc<dyn PolicyEngine> {
+    Arc::new(cairn_policy::pos::CheckpointPrefix)
 }
 
 /// A signer node.
@@ -94,6 +108,8 @@ pub struct SignerNode {
     pub peers: Peers,
     pub link: Link,
     pub fault: FaultMode,
+    /// Asked before this signer agrees to a message.
+    pub policy: Arc<dyn PolicyEngine>,
 }
 
 impl SignerNode {
@@ -169,10 +185,14 @@ impl Handler for SignerNode {
                 refused("misaddressed frame")
             } else {
                 match request.body {
-                    Body::Prepare { message } if message_allowed(&message) => Body::Ready {
-                        binding: ready_binding(&request.session, self.id, &self.group),
-                    },
-                    Body::Prepare { .. } => refused("not a checkpoint message"),
+                    Body::Prepare { message } => {
+                        match policy_refusal(&*self.policy, &request.session, &message) {
+                            None => Body::Ready {
+                                binding: ready_binding(&request.session, self.id, &self.group),
+                            },
+                            Some(reason) => refused(&reason),
+                        }
+                    }
                     Body::Deal { active, roots } => self.deal(request.session, active, roots).await,
                     Body::Abort => Body::Ack,
                     _ => refused("unexpected request"),
@@ -209,6 +229,8 @@ pub struct RootNode {
     pub mpc_socket_dir: PathBuf,
     /// Deadline for one MPC phase.
     pub mpc_timeout: Duration,
+    /// Asked before the root engine opens a session for a message.
+    pub policy: Arc<dyn PolicyEngine>,
     sessions: Mutex<HashMap<[u8; 32], RootSession>>,
 }
 
@@ -229,6 +251,7 @@ impl RootNode {
             fault,
             mpc_socket_dir,
             mpc_timeout,
+            policy: default_policy(),
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -390,8 +413,9 @@ impl Handler for RootNode {
             let body = match request.body {
                 _ if request.to != self.id => refused("misaddressed frame"),
                 Body::Prepare { message } if from_coordinator => {
-                    if !message_allowed(&message) {
-                        refused("not a checkpoint message")
+                    if let Some(reason) = policy_refusal(&*self.policy, &request.session, &message)
+                    {
+                        refused(&reason)
                     } else {
                         let mut sessions = self.sessions.lock().expect("root sessions");
                         if sessions.len() >= MAX_SESSIONS {

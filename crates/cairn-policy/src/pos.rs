@@ -248,6 +248,21 @@ impl Policy {
     }
 }
 
+/// The format check alone: the payload starts with the checkpoint domain. What the tower's
+/// signer and root nodes run by default; it keeps no memory of what was signed.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CheckpointPrefix;
+
+impl PolicyEngine for CheckpointPrefix {
+    fn authorize_sign(&self, _ctx: &SignContext, payload: &[u8]) -> Result<(), PolicyError> {
+        if payload.starts_with(CHECKPOINT_DOMAIN) {
+            Ok(())
+        } else {
+            Err(PolicyError::Refused("not a checkpoint message".into()))
+        }
+    }
+}
+
 /// [`Policy`] as a [`PolicyEngine`]: what a proof-of-stake party runs.
 pub struct PosCheckpointPolicy(Mutex<Policy>);
 

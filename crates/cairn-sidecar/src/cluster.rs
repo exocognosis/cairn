@@ -509,6 +509,21 @@ impl ProcessCommittee {
         link_delay_ms: u64,
         round_timeout_ms: u64,
     ) -> std::io::Result<Self> {
+        Self::spawn_with(exe, dir, t, n, faults, link_delay_ms, round_timeout_ms, &[])
+    }
+
+    /// As [`spawn`](Self::spawn), with more arguments for every party (its policy, say).
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with(
+        exe: &Path,
+        dir: &Path,
+        t: usize,
+        n: usize,
+        faults: &[(NodeId, FaultMode)],
+        link_delay_ms: u64,
+        round_timeout_ms: u64,
+        party_args: &[String],
+    ) -> std::io::Result<Self> {
         use cairn_net::flat::{party_share_file, write_flat_keys};
         let (key, parties) = threshold_mldsa::mithril::keygen(t, n, &mut rand::rngs::OsRng)
             .ok_or_else(|| std::io::Error::other("no parameter set for that committee"))?;
@@ -565,6 +580,7 @@ impl ProcessCommittee {
                     .args(["--fault", fault_name(fault)])
                     .args(["--link-delay-ms", &link_delay_ms.to_string()])
                     .args(["--round-timeout-ms", &round_timeout_ms.to_string()])
+                    .args(party_args)
                     .stderr(log)
                     .spawn()?,
             );

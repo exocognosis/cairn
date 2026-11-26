@@ -42,6 +42,8 @@ fn authorize_sign(&self, ctx: &SignContext, payload: &[u8]) -> Result<(), Policy
 | Implementation | Rule |
 |---|---|
 | `PosCheckpointPolicy` | A well-formed checkpoint for this key, on a served chain, never below or conflicting with one already signed (state on disk before answering) |
+| `OrgGovernancePolicy` | Any payload that enough named approvers approved for this committee, unexpired; the decision is logged first. See [ORG_POLICY.md](ORG_POLICY.md) |
+| `pos::CheckpointPrefix` | The payload starts with the checkpoint domain. The tower nodes' default |
 | `Unrestricted` | Anything. Protects nothing by itself |
 
 **`cairn_core::RosterProvider`**: who is on the committee, with weights. `StaticRoster` and
@@ -64,11 +66,10 @@ latency and maturity favour the flat protocol.
 
 - **Resharing and share refresh**: `reshare` returns `Unsupported` on every backend. See
   BLOCKERS.md.
-- **An organization policy**: approvals, limits, roles. The trait is ready
-  (`crates/cairn-net/tests/policy_plug.rs` runs a committee under a non-checkpoint rule); no
-  such policy ships, and the `cairn` CLI always runs the checkpoint rules.
-- **The networked tower nodes still check the checkpoint prefix themselves**
-  (`cairn-net/src/node.rs`) instead of asking a `PolicyEngine`.
+- **Richer organization rules**: `--policy org` covers approvals and an audit log. Limits,
+  roles, single-use approvals and approver revocation do not exist.
+- **The tower's CLI nodes always run the checkpoint format check.** `SignerNode` and
+  `RootNode` take any `PolicyEngine` in code; no flag selects one.
 - **Roster providers for chains or directories**, and a path from a roster to a running
   committee: today key generation takes `T` and `N` directly.
 - **Other front ends** (PKCS#11, KMIP, gRPC, peer-to-peer). `cairn-gateway` has the KMS API

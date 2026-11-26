@@ -567,3 +567,21 @@ assignment and any chain adapter need them. The flat protocol has none, so
 **D-110. The KMS front end keeps `cairn-net` as a dependency.** Its TLS listener is the one
 in `cairn-net`. Moving that into a transport-free crate is possible and was left: it would
 change no behaviour and the gateway already takes any `ThresholdSigner`.
+
+**D-111. Tower nodes ask the policy trait too.** `SignerNode` and `RootNode` hold a
+`PolicyEngine`; the default, `pos::CheckpointPrefix`, is the format check they had, with the
+same refusal text. No node in `cairn-net` decides what is signable any more.
+
+**D-112. Approvals arrive as files, not on the wire.** The organization policy reads
+approvals from the party's own directory. Carrying them in the signing request would need a
+new wire version and would route them through the coordinator, which is the component the
+policy exists to distrust. The price is that delivery is the operator's job.
+
+**D-113. Approvers sign with ML-DSA-65, under their own context string.** A classical
+approver signature would be the weakest link of a post-quantum committee. The statement is
+committee key id, payload digest and expiry; the FIPS 204 context `cairn/approval/v1`
+separates it from every other signature in the system.
+
+**D-114. No audit line, no signature.** With an audit log configured, the organization
+policy refuses when the line cannot be written and synced. An unrecorded authorisation is
+the failure an audit log exists to prevent.
