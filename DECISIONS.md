@@ -631,3 +631,25 @@ The frame changed, so the network version is 4; nodes of version 3 and 4 do not 
 `--policy checkpoint|format|org|hook` with the same files and hooks as a committee party.
 With no flag they run the format check as before (`format`), so existing deployments keep
 their behaviour.
+
+**D-123. Root engines sign the session before any mask exists.** At install each engine
+signs, with its TLS key, a statement of the session, its message, the active set and
+weights, the three engines in slot order and the three verification shares. An engine runs
+the mask phase only with the other two engines' signatures on the same statement. Before
+this each engine checked only its own verification share, so a coordinator could show the
+engines different sessions. Network version 5.
+
+**D-124. A policy is asked on a blocking thread, before any session state is touched.** A
+hook may take seconds. Parties, signers and root engines now ask on a thread of their own,
+and a committee party asks before it takes its session lock, so one slow check delays one
+reply and nothing else. A policy that panics refuses.
+
+**D-125. The organization rule file is read again when it changes.** Removing an approver
+takes effect on the next request with no restart. A rule that cannot be read or enforced
+refuses everything rather than falling back to the last good rule: after an edit meant to
+remove someone, the old rule is the wrong one to keep using.
+
+**D-126. Approvals get a use window, not a use count.** `use_window_secs` in the rule lets a
+party authorize a payload for that long after it first does, then never again on those
+approvals. A count of one would break ordinary signing, where a request can need several
+sessions and each asks the policy.

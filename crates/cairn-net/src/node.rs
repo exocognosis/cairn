@@ -84,6 +84,44 @@ pub fn message_digest(session: &[u8; 32], message: &[u8]) -> [u8; 32] {
     out
 }
 
+/// What a root engine signs before any mask exists: the session, its message, the active
+/// set with its weights, the three engines in slot order and their verification shares. An
+/// engine runs the mask phase only when the other two signed the same statement, so a
+/// coordinator cannot show the engines different sessions.
+pub fn session_statement(
+    session: &[u8; 32],
+    message: &[u8],
+    active: &threshold_mldsa::Active,
+    roots: &[u8],
+    verification: &[Vec<i32>],
+) -> Vec<u8> {
+    let mut data = Vec::new();
+    for (path, weight) in active.weights() {
+        data.push(path.len() as u8);
+        data.extend_from_slice(&path);
+        data.extend_from_slice(&weight.to_le_bytes());
+    }
+    data.push(0xff);
+    data.extend_from_slice(roots);
+    for share in verification {
+        data.extend_from_slice(&(share.len() as u32).to_le_bytes());
+        for coefficient in share {
+            data.extend_from_slice(&coefficient.to_le_bytes());
+        }
+    }
+    let mut out = [0u8; 32];
+    fips204::shake256(
+        &[
+            b"cairn/net-session/v1",
+            session,
+            &message_digest(session, message),
+            &data,
+        ],
+        &mut out,
+    );
+    out.to_vec()
+}
+
 /// Sessions a signer has approved a message for and not yet dealt in: session to digest.
 #[derive(Default)]
 pub struct Approved(Mutex<HashMap<[u8; 32], [u8; 32]>>);
@@ -108,17 +146,30 @@ fn refused(reason: &str) -> Body {
     }
 }
 
-/// What the node's policy says about `message`, as a refusal reason.
-fn policy_refusal(policy: &dyn PolicyEngine, session: &[u8; 32], message: &[u8]) -> Option<String> {
-    let ctx = SignContext {
-        session,
-        party: 0,
-        signers: &[],
-    };
-    policy
-        .authorize_sign(&ctx, message)
-        .err()
-        .map(|refused| refused.to_string())
+/// What the node's policy says about `message`, as a refusal reason. A policy may run a
+/// program or call a service, so it is asked on a blocking thread, never on the threads that
+/// carry the node's network traffic. A policy that panics refuses.
+pub(crate) async fn policy_refusal(
+    policy: &Arc<dyn PolicyEngine>,
+    session: [u8; 32],
+    party: u8,
+    signers: Vec<u8>,
+    message: Vec<u8>,
+) -> Option<String> {
+    let policy = policy.clone();
+    let asked = tokio::task::spawn_blocking(move || {
+        let ctx = SignContext {
+            session: &session,
+            party,
+            signers: &signers,
+        };
+        policy.authorize_sign(&ctx, &message)
+    });
+    match asked.await {
+        Ok(Ok(())) => None,
+        Ok(Err(refused)) => Some(refused.to_string()),
+        Err(_) => Some("the signing policy failed".into()),
+    }
 }
 
 /// The policy tower nodes run unless given another: the checkpoint format check.
@@ -220,7 +271,14 @@ impl Handler for SignerNode {
             } else {
                 match request.body {
                     Body::Prepare { message } => {
-                        match policy_refusal(&*self.policy, &request.session, &message) {
+                        let refusal = policy_refusal(
+                            &self.policy,
+                            request.session,
+                            0,
+                            Vec::new(),
+                            message.clone(),
+                        );
+                        match refusal.await {
                             None => {
                                 self.approved.insert(
                                     request.session,
@@ -259,6 +317,13 @@ struct RootSession {
     share: Option<AdditiveShare>,
     slot: u8,
     verification: Vec<Vec<i32>>,
+    /// The active set this engine collected for.
+    active: Option<threshold_mldsa::Active>,
+    /// The engines in slot order and the statement this engine signed at install.
+    roots: Vec<u8>,
+    statement: Vec<u8>,
+    /// The other two engines signed the same statement.
+    agreed: bool,
     y: Option<PolyVec>,
     c_tilde: Option<[u8; C_TILDE_BYTES]>,
 }
@@ -274,6 +339,9 @@ pub struct RootNode {
     pub mpc_timeout: Duration,
     /// Asked before the root engine opens a session for a message.
     pub policy: Arc<dyn PolicyEngine>,
+    /// This engine's identity, for signing the session and checking the other engines'
+    /// signatures. Set by `run_root`; without it the engine installs nothing.
+    pub tls: Option<Arc<crate::tls::TlsIdentity>>,
     sessions: Mutex<HashMap<[u8; 32], RootSession>>,
 }
 
@@ -295,6 +363,7 @@ impl RootNode {
             mpc_socket_dir,
             mpc_timeout,
             policy: default_policy(),
+            tls: None,
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -352,9 +421,82 @@ impl RootNode {
             // Step 3: this engine's additive share of the master key.
             s.share = missing.is_empty().then(|| AdditiveShare::sum(parts));
             s.subs.clear();
+            s.active = Some(active.clone());
             Body::ShareCheck { values, missing }
         })
         .unwrap_or_else(|| refused("unknown session"))
+    }
+
+    /// Install the MPC slot and sign the session this engine was shown.
+    fn install(
+        &self,
+        session: &[u8; 32],
+        slot: u8,
+        roots: Vec<u8>,
+        verification: Vec<Vec<i32>>,
+    ) -> Body {
+        let Some(tls) = &self.tls else {
+            return refused("this engine has no identity to sign the session with");
+        };
+        let a_hat = self.group.a_hat();
+        self.with(session, |s| {
+            let own = s.share.as_ref().map(|sh| to_flat(&sh.verification(a_hat)));
+            let slot_ok = (1..=PARTIES as u8).contains(&slot)
+                && verification.len() == PARTIES
+                && roots.len() == PARTIES
+                && roots.get(slot as usize - 1).map(|k| NodeId::Root(*k)) == Some(self.id);
+            let (true, Some(active)) = (slot_ok, s.active.as_ref()) else {
+                return refused("install does not name this engine's slot");
+            };
+            if own.as_ref() != verification.get(slot as usize - 1) {
+                return refused("verification shares do not match this engine's share");
+            }
+            let statement = session_statement(session, &s.message, active, &roots, &verification);
+            let Ok((cert, signature)) = tls.attest(&statement) else {
+                return refused("cannot sign the session");
+            };
+            s.slot = slot;
+            s.verification = verification;
+            s.roots = roots;
+            s.statement = statement;
+            s.agreed = false;
+            Body::Installed {
+                attestation: crate::wire::Attestation { cert, signature },
+            }
+        })
+        .unwrap_or_else(|| refused("unknown session"))
+    }
+
+    /// True once the other two engines are known to have signed this engine's statement.
+    fn agreed(&self, session: &[u8; 32], attestations: &[(u8, crate::wire::Attestation)]) -> bool {
+        let Some(tls) = &self.tls else {
+            return false;
+        };
+        self.with(session, |s| {
+            if s.agreed {
+                return true;
+            }
+            if s.slot == 0 {
+                return false;
+            }
+            s.agreed = s
+                .roots
+                .iter()
+                .filter(|k| NodeId::Root(**k) != self.id)
+                .all(|k| {
+                    attestations.iter().any(|(from, a)| {
+                        from == k
+                            && tls.attested_by(
+                                NodeId::Root(*k),
+                                &a.cert,
+                                &s.statement,
+                                &a.signature,
+                            )
+                    })
+                });
+            s.agreed
+        })
+        .unwrap_or(false)
     }
 
     async fn mask(&self, session: [u8; 32], attempt: u32) -> Body {
@@ -456,8 +598,9 @@ impl Handler for RootNode {
             let body = match request.body {
                 _ if request.to != self.id => refused("misaddressed frame"),
                 Body::Prepare { message } if from_coordinator => {
-                    if let Some(reason) = policy_refusal(&*self.policy, &request.session, &message)
-                    {
+                    let refusal =
+                        policy_refusal(&self.policy, session, 0, Vec::new(), message.clone());
+                    if let Some(reason) = refusal.await {
                         refused(&reason)
                     } else {
                         let mut sessions = self.sessions.lock().expect("root sessions");
@@ -496,23 +639,21 @@ impl Handler for RootNode {
                     }
                 }
                 Body::Collect { active } if from_coordinator => self.collect(&session, &active),
-                Body::Install { slot, verification } if from_coordinator => {
-                    let a_hat = self.group.a_hat();
-                    self.with(&session, |s| {
-                        let own = s.share.as_ref().map(|sh| to_flat(&sh.verification(a_hat)));
-                        let slot_ok =
-                            (1..=PARTIES as u8).contains(&slot) && verification.len() == PARTIES;
-                        if slot_ok && own.as_ref() == verification.get(slot as usize - 1) {
-                            s.slot = slot;
-                            s.verification = verification;
-                            Body::Installed
-                        } else {
-                            refused("verification shares do not match this engine's share")
-                        }
-                    })
-                    .unwrap_or_else(|| refused("unknown session"))
+                Body::Install {
+                    slot,
+                    roots,
+                    verification,
+                } if from_coordinator => self.install(&session, slot, roots, verification),
+                Body::Mask {
+                    attempt,
+                    attestations,
+                } if from_coordinator => {
+                    if self.agreed(&session, &attestations) {
+                        self.mask(session, attempt).await
+                    } else {
+                        refused("the other engines did not sign this session")
+                    }
                 }
-                Body::Mask { attempt } if from_coordinator => self.mask(session, attempt).await,
                 Body::Finish if from_coordinator => self.finish(session).await,
                 Body::Abort if from_coordinator => {
                     self.close(session).await;

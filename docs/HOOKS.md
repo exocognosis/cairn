@@ -89,8 +89,8 @@ long-running caller uses the KMS endpoint instead.
   decides what that party signs. It runs on the party's machine for that reason, and each
   party should run its own, against its own node or data.
 - **The coordinator still cannot choose.** It sees refusal reasons, not the hook.
-- **A slow hook holds up that party's reply** for up to the timeout, and one of the party
-  process's worker threads with it.
+- **A slow hook holds up that request's reply** for up to the timeout. It runs on its own
+  thread, so the party keeps answering other requests meanwhile.
 - **Tested with stand-ins.** The tests use shell scripts and a minimal HTTP server speaking
   OPA's shapes. No run against a real Open Policy Agent, node or light client has been done
   here.

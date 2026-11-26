@@ -346,3 +346,112 @@ async fn a_signer_deals_only_for_the_message_it_approved() {
     let reply = ask(target, session, deal).await;
     assert!(matches!(reply, Body::Refused { .. }), "{}", reply.kind());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn engines_mask_only_for_a_session_all_three_signed() {
+    use cairn_net::transport::call;
+    use cairn_net::{Body, Frame, Link};
+    use threshold_mldsa::Active;
+    let (cluster, _) = cluster(60, &[]).await;
+    let link = Link::new(
+        TIMEOUT,
+        Duration::ZERO,
+        cluster.identity(NodeId::Coordinator),
+    );
+    let session = [3; 32];
+    let ask = |to: NodeId, body: Body| {
+        let (addr, link) = (cluster.peers[&to].clone(), link.clone());
+        async move {
+            let frame = Frame {
+                version: cairn_net::wire::NET_VERSION,
+                from: NodeId::Coordinator,
+                to,
+                session,
+                body,
+            };
+            call(&addr, &link, &frame).await.unwrap().reply.body
+        }
+    };
+    let leaves = (1..=3u8)
+        .map(|leaf| {
+            let members = (1..=3u8).map(|s| (s, Active::Signer)).collect();
+            (leaf, Active::Committee(members))
+        })
+        .collect();
+    let active = Active::Committee(leaves);
+    let roots = vec![1u8, 2, 3];
+    let signers: Vec<NodeId> = (1..=3)
+        .flat_map(|l| (1..=3).map(move |s| signer(l, s)))
+        .collect();
+    let engines: Vec<NodeId> = roots.iter().map(|k| NodeId::Root(*k)).collect();
+
+    // An honest run up to the point where the engines hold their shares.
+    for id in signers.iter().chain(&engines) {
+        let prepare = Body::Prepare {
+            message: message("split"),
+        };
+        assert!(matches!(ask(*id, prepare).await, Body::Ready { .. }));
+    }
+    for id in &signers {
+        let deal = Body::Deal {
+            active: active.clone(),
+            roots: roots.clone(),
+        };
+        assert!(matches!(ask(*id, deal).await, Body::Dealt { .. }));
+    }
+    let mut verification = Vec::new();
+    for id in &engines {
+        let collect = Body::Collect {
+            active: active.clone(),
+        };
+        let Body::ShareCheck { values, missing } = ask(*id, collect).await else {
+            panic!("no share check from {id}");
+        };
+        assert!(missing.is_empty());
+        let mut sum = vec![0i64; values[0].1.len()];
+        for (_, value) in &values {
+            for (acc, v) in sum.iter_mut().zip(value) {
+                *acc = (*acc + *v as i64).rem_euclid(fips204::Q as i64);
+            }
+        }
+        verification.push(sum.into_iter().map(|v| v as i32).collect::<Vec<i32>>());
+    }
+
+    // The coordinator shows engine 3 another engine's verification share altered. Engine 3
+    // can only check its own entry, so it installs; but it signs what it saw.
+    let mut altered = verification.clone();
+    altered[0][0] = (altered[0][0] + 1) % fips204::Q;
+    let mut attestations = Vec::new();
+    for (i, id) in engines.iter().enumerate() {
+        let install = Body::Install {
+            slot: i as u8 + 1,
+            roots: roots.clone(),
+            verification: if i == 2 {
+                altered.clone()
+            } else {
+                verification.clone()
+            },
+        };
+        let Body::Installed { attestation } = ask(*id, install).await else {
+            panic!("{id} did not install");
+        };
+        attestations.push((roots[i], attestation));
+    }
+
+    // No engine runs the mask phase: 1 and 2 lack 3's signature on their session, 3 lacks
+    // theirs, and none starts without the signatures at all.
+    for id in &engines {
+        for shown in [attestations.clone(), Vec::new()] {
+            let mask = Body::Mask {
+                attempt: 0,
+                attestations: shown,
+            };
+            let reply = ask(*id, mask).await;
+            assert!(
+                matches!(&reply, Body::Refused { reason } if reason.contains("did not sign")),
+                "{id}: {}",
+                reply.kind()
+            );
+        }
+    }
+}

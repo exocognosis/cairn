@@ -164,10 +164,18 @@ pub struct OrgConfig {
     /// Append-only log of every decision, one JSON object per line. When set, a payload is
     /// signed only if its decision could be written.
     pub audit_log: Option<PathBuf>,
+    /// The file the rule came from. When set, the party reads it again whenever it changes,
+    /// so an approver is added or removed without a restart; a rule it cannot read or that
+    /// is not valid refuses everything until it is fixed.
+    pub rule_file: Option<PathBuf>,
+    /// When set, approvals of a payload can be used for this many seconds from the first
+    /// time this party authorizes it, and not after, whatever their own expiry says.
+    pub use_window_secs: Option<u64>,
 }
 
 impl OrgConfig {
-    /// Read `{"required": 2, "approvers": {"alice": "<public key hex>", ...}}`.
+    /// Read `{"required": 2, "approvers": {"alice": "<public key hex>", ...}}`, with an
+    /// optional `"use_window_secs": <n>`.
     pub fn load(
         rule_file: &Path,
         approvals_dir: PathBuf,
@@ -193,26 +201,33 @@ impl OrgConfig {
                     .ok_or_else(|| bad(&format!("approver {name}: key is not hex")))
             })
             .collect::<Result<_, _>>()?;
+        let use_window_secs = match v.get("use_window_secs") {
+            None => None,
+            Some(n) => Some(
+                n.as_u64()
+                    .ok_or_else(|| bad("\"use_window_secs\" is not a number"))?,
+            ),
+        };
         Ok(Self {
             required,
             approvers,
             approvals_dir,
             audit_log,
+            rule_file: Some(rule_file.to_owned()),
+            use_window_secs,
         })
     }
 }
 
-/// [`OrgConfig`] enforced for one committee key.
-pub struct OrgGovernancePolicy {
-    committee_key_id: [u8; 32],
+/// The part of the rule that can change while the party runs.
+struct Rule {
     required: usize,
     approvers: BTreeMap<String, VerifyingKey<MlDsa65>>,
-    approvals_dir: PathBuf,
-    audit_log: Option<PathBuf>,
+    use_window_secs: Option<u64>,
 }
 
-impl OrgGovernancePolicy {
-    pub fn new(committee_pk: &[u8], config: OrgConfig) -> Result<Self, String> {
+impl Rule {
+    fn build(config: &OrgConfig) -> Result<Self, String> {
         if config.required == 0 || config.required > config.approvers.len() {
             return Err(format!(
                 "{} approvals required of {} approvers",
@@ -222,8 +237,8 @@ impl OrgGovernancePolicy {
         }
         let mut approvers = BTreeMap::new();
         let mut seen = std::collections::BTreeSet::new();
-        for (name, key) in config.approvers {
-            if !valid_name(&name) {
+        for (name, key) in &config.approvers {
+            if !valid_name(name) {
                 return Err(format!("approver name {name:?} is not allowed"));
             }
             if key.len() != PUBLIC_KEY_BYTES {
@@ -235,20 +250,77 @@ impl OrgGovernancePolicy {
             }
             let encoded = EncodedVerifyingKey::<MlDsa65>::try_from(key.as_slice())
                 .map_err(|_| format!("approver {name}: not an ML-DSA-65 public key"))?;
-            approvers.insert(name, VerifyingKey::<MlDsa65>::decode(&encoded));
+            approvers.insert(name.clone(), VerifyingKey::<MlDsa65>::decode(&encoded));
         }
         Ok(Self {
-            committee_key_id: key_id(committee_pk),
             required: config.required,
             approvers,
+            use_window_secs: config.use_window_secs,
+        })
+    }
+}
+
+/// [`OrgConfig`] enforced for one committee key.
+pub struct OrgGovernancePolicy {
+    committee_key_id: [u8; 32],
+    /// The rule in force and the bytes of the rule file it was built from.
+    rule: std::sync::Mutex<(Rule, Vec<u8>)>,
+    rule_file: Option<PathBuf>,
+    approvals_dir: PathBuf,
+    audit_log: Option<PathBuf>,
+}
+
+impl OrgGovernancePolicy {
+    pub fn new(committee_pk: &[u8], config: OrgConfig) -> Result<Self, String> {
+        let rule = Rule::build(&config)?;
+        let bytes = match &config.rule_file {
+            Some(file) => std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?,
+            None => Vec::new(),
+        };
+        Ok(Self {
+            committee_key_id: key_id(committee_pk),
+            rule: std::sync::Mutex::new((rule, bytes)),
+            rule_file: config.rule_file,
             approvals_dir: config.approvals_dir,
             audit_log: config.audit_log,
         })
     }
 
+    /// Bring `current` up to date with the rule file, if there is one and it changed.
+    fn refresh(&self, current: &mut (Rule, Vec<u8>)) -> Result<(), String> {
+        let Some(file) = &self.rule_file else {
+            return Ok(());
+        };
+        let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        if bytes != current.1 {
+            let config = OrgConfig::load(file, self.approvals_dir.clone(), None)?;
+            *current = (Rule::build(&config)?, bytes);
+        }
+        Ok(())
+    }
+
+    /// With a use window: when this party first authorized `digest`, recorded now if never.
+    /// The record is a file beside the approvals, so it survives a restart.
+    fn first_use(&self, digest: &[u8; 32], at: u64) -> std::io::Result<u64> {
+        let path = self.approvals_dir.join(format!("{}.used", hex(digest)));
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            return text
+                .trim()
+                .parse()
+                .map_err(|_| std::io::Error::other("unreadable use record"));
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        writeln!(f, "{at}")?;
+        f.sync_data()?;
+        Ok(at)
+    }
+
     /// The approvers with a valid, unexpired approval of `digest` in this party's directory.
-    fn approved_by(&self, digest: &[u8; 32], at: u64) -> Vec<String> {
-        self.approvers
+    fn approved_by(&self, rule: &Rule, digest: &[u8; 32], at: u64) -> Vec<String> {
+        rule.approvers
             .iter()
             .filter(|(name, key)| {
                 let path = self.approvals_dir.join(Approval::file_name(digest, name));
@@ -296,21 +368,52 @@ impl PolicyEngine for OrgGovernancePolicy {
     fn authorize_sign(&self, ctx: &SignContext, payload: &[u8]) -> Result<(), PolicyError> {
         let digest: [u8; 32] = Sha3_256::digest(payload).into();
         let at = now();
-        let approved_by = self.approved_by(&digest, at);
-        let enough = approved_by.len() >= self.required;
+        let mut current = self.rule.lock().expect("organization rule");
+        let refuse = |event: &str, reason: String| {
+            // Best effort: a refusal stands whether or not it could be logged.
+            let _ = self.audit(serde_json::json!({
+                "time": at,
+                "event": event,
+                "session": hex(&ctx.session[..8]),
+                "payload_sha3": hex(&digest),
+                "reason": reason,
+            }));
+            Err(PolicyError::Refused(reason))
+        };
+        if let Err(e) = self.refresh(&mut current) {
+            return refuse(
+                "rule_unusable",
+                format!("the organization rule is unusable: {e}"),
+            );
+        }
+        let rule = &current.0;
+        let approved_by = self.approved_by(rule, &digest, at);
+        let enough = approved_by.len() >= rule.required;
+        if let (true, Some(window)) = (enough, rule.use_window_secs) {
+            match self.first_use(&digest, at) {
+                Ok(first) if at <= first.saturating_add(window) => {}
+                Ok(first) => {
+                    return refuse(
+                        "spent",
+                        format!("the approvals of this payload were used at {first} and its {window} s window has passed"),
+                    )
+                }
+                Err(e) => return refuse("refused", format!("cannot record the first use: {e}")),
+            }
+        }
         let recorded = self.audit(serde_json::json!({
             "time": at,
             "event": if enough { "authorized" } else { "refused" },
             "session": hex(&ctx.session[..8]),
             "payload_sha3": hex(&digest),
             "approved_by": approved_by,
-            "required": self.required,
+            "required": rule.required,
         }));
         match (enough, recorded) {
             (false, _) => Err(PolicyError::Refused(format!(
                 "{} of {} required approvals",
                 approved_by.len(),
-                self.required
+                rule.required
             ))),
             (true, Err(e)) => Err(PolicyError::Refused(format!(
                 "cannot record the decision: {e}"
@@ -451,6 +554,8 @@ mod tests {
                 .collect(),
             approvals_dir: PathBuf::from("."),
             audit_log: None,
+            rule_file: None,
+            use_window_secs: None,
         };
         let new = |c| OrgGovernancePolicy::new(b"committee", c).is_ok();
         assert!(new(config(1, &[("alice", key.clone())])));
@@ -480,6 +585,87 @@ mod tests {
             policy.authorize_sign(&CTX, b"x"),
             Err(PolicyError::Refused(reason)) if reason.starts_with("cannot record")
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_rule(dir: &Path, keys: &[&ApproverKey], required: usize, window: Option<u64>) {
+        let approvers: BTreeMap<_, _> = keys
+            .iter()
+            .map(|k| (k.name.clone(), hex(&k.public_key())))
+            .collect();
+        let mut rule = serde_json::json!({ "required": required, "approvers": approvers });
+        if let Some(window) = window {
+            rule["use_window_secs"] = window.into();
+        }
+        std::fs::write(dir.join("rule.json"), rule.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_removed_approver_stops_counting_without_a_restart() {
+        let (dir, keys, policy) = setup("revoke", 2);
+        let payload = b"grant admin to dave";
+        for key in [&keys[0], &keys[2]] {
+            key.approve(b"committee", payload, now() + 600)
+                .write(&dir)
+                .unwrap();
+        }
+        assert!(policy.authorize_sign(&CTX, payload).is_ok());
+
+        // Carol leaves: her approval, still on disk and still unexpired, no longer counts.
+        write_rule(&dir, &[&keys[0], &keys[1]], 2, None);
+        assert_eq!(
+            policy.authorize_sign(&CTX, payload),
+            Err(PolicyError::Refused("1 of 2 required approvals".into()))
+        );
+        // A rule that cannot be enforced refuses everything, and says so.
+        write_rule(&dir, &[&keys[0]], 2, None);
+        let Err(PolicyError::Refused(reason)) = policy.authorize_sign(&CTX, payload) else {
+            panic!("an unusable rule authorized a payload");
+        };
+        assert!(reason.contains("rule is unusable"), "{reason}");
+        std::fs::write(dir.join("rule.json"), "not json").unwrap();
+        assert!(policy.authorize_sign(&CTX, payload).is_err());
+        // Restored, it signs again.
+        write_rule(&dir, &[&keys[0], &keys[1], &keys[2]], 2, None);
+        assert!(policy.authorize_sign(&CTX, payload).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn approvals_are_spent_after_their_use_window() {
+        let (dir, keys, policy) = setup("window", 2);
+        write_rule(&dir, &[&keys[0], &keys[1], &keys[2]], 2, Some(60));
+        let approve = |payload: &[u8]| {
+            for key in [&keys[0], &keys[1]] {
+                key.approve(b"committee", payload, now() + 86_400)
+                    .write(&dir)
+                    .unwrap();
+            }
+        };
+        let used = |payload: &[u8]| {
+            let digest: [u8; 32] = Sha3_256::digest(payload).into();
+            dir.join(format!("{}.used", hex(&digest)))
+        };
+
+        // Within the window a payload can be authorized again: a session may be retried.
+        let fresh = b"release 1.0";
+        approve(fresh);
+        assert!(!used(fresh).exists());
+        assert!(policy.authorize_sign(&CTX, fresh).is_ok());
+        assert!(policy.authorize_sign(&CTX, fresh).is_ok());
+        assert!(used(fresh).exists());
+
+        // First used long ago: the approvals have a day left, and are spent all the same.
+        let old = b"release 0.9";
+        approve(old);
+        std::fs::write(used(old), format!("{}\n", now() - 3600)).unwrap();
+        let Err(PolicyError::Refused(reason)) = policy.authorize_sign(&CTX, old) else {
+            panic!("spent approvals authorized a payload");
+        };
+        assert!(reason.contains("window has passed"), "{reason}");
+        // A payload nobody approved leaves no record.
+        assert!(policy.authorize_sign(&CTX, b"release 6.6").is_err());
+        assert!(!used(b"release 6.6").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -70,3 +70,58 @@ async fn parties_sign_what_their_own_policy_allows() {
         Err(NetError::Policy(_))
     ));
 }
+
+/// A policy that takes a while, as one that runs a program or calls a service may.
+struct Slow(Duration);
+
+impl PolicyEngine for Slow {
+    fn authorize_sign(&self, _: &SignContext, _: &[u8]) -> Result<(), PolicyError> {
+        std::thread::sleep(self.0);
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_slow_policy_does_not_hold_up_the_party() {
+    use cairn_net::transport::call;
+    use cairn_net::{Body, Frame, Link};
+    let slow = Duration::from_millis(1500);
+    let (c, _) = committee(move |_| Box::new(Slow(slow))).await;
+    let link = Link::new(
+        Duration::from_secs(20),
+        Duration::ZERO,
+        c.identity(NodeId::Coordinator),
+    );
+    let ask = |session: [u8; 32], body: Body| {
+        let frame = Frame {
+            version: cairn_net::wire::NET_VERSION,
+            from: NodeId::Coordinator,
+            to: NodeId::Party(1),
+            session,
+            body,
+        };
+        let (addr, link) = (c.peers[&NodeId::Party(1)].clone(), link.clone());
+        async move { call(&addr, &link, &frame).await.unwrap().reply.body }
+    };
+    // A signing request whose policy check is still running...
+    let waiting = tokio::spawn(ask(
+        [1; 32],
+        Body::M2 {
+            message: b"anything".to_vec(),
+            presign: [0; 32],
+            commitments: Vec::new(),
+        },
+    ));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // ...does not stop the same party, on its one network thread, answering another.
+    let started = std::time::Instant::now();
+    let reply = ask([2; 32], Body::Presign).await;
+    assert!(matches!(reply, Body::PresignCommit { .. }));
+    assert!(
+        started.elapsed() < Duration::from_millis(800),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(!waiting.is_finished());
+    assert!(matches!(waiting.await.unwrap(), Body::Refused { .. }));
+}

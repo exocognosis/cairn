@@ -23,7 +23,7 @@ use crate::node::{FaultMode, Peers};
 use crate::tls::{ClusterTls, TlsIdentity};
 use crate::transport::{call, serve, CallError, Handler, Link, Pool, Reply};
 use crate::wire::{Attestation, Body, Frame, NodeId, NET_VERSION};
-use cairn_policy::{PolicyEngine, SignContext};
+use cairn_policy::PolicyEngine;
 use futures_util::future::join_all;
 use rand::rngs::OsRng;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -61,7 +61,7 @@ pub struct PartyNode {
     pub fault: FaultMode,
     sessions: Mutex<HashMap<[u8; 32], PartySession>>,
     presigns: Mutex<std::collections::VecDeque<Presigned>>,
-    policy: Box<dyn PolicyEngine>,
+    policy: Arc<dyn PolicyEngine>,
     /// Unused masks and half-finished sessions older than this are erased.
     pub mask_ttl: Duration,
     pub stats: Arc<PartyStats>,
@@ -212,7 +212,7 @@ impl PartyNode {
             fault,
             sessions: Mutex::new(HashMap::new()),
             presigns: Mutex::default(),
-            policy: Box::new(policy),
+            policy: Arc::new(policy),
             mask_ttl: MASK_TTL,
             stats: Arc::default(),
             tls,
@@ -245,17 +245,7 @@ impl PartyNode {
                 presign,
                 commitments,
             } => {
-                let signers: Vec<u8> = commitments.iter().map(|(index, _)| *index).collect();
-                let ctx = SignContext {
-                    session: &session,
-                    party: self.share.index,
-                    signers: &signers,
-                };
-                if let Err(refused) = self.policy.authorize_sign(&ctx, &message) {
-                    return Body::PolicyRefused {
-                        reason: refused.to_string(),
-                    };
-                }
+                // The policy was asked in `handle`, before this lock was taken.
                 // Take the masks out of the pool: they can serve this one session only.
                 let taken = {
                     let mut presigns = self.presigns.lock().expect("presigns");
@@ -384,7 +374,30 @@ impl Handler for PartyNode {
             let body = if request.to != self.id || request.from != NodeId::Coordinator {
                 refused("misaddressed frame")
             } else {
-                self.respond(request.session, request.body)
+                // Ask the policy before touching any session state, on a blocking thread:
+                // it may run a program or call a service, and must not hold up the other
+                // sessions or the network threads while it does.
+                let refusal = match &request.body {
+                    Body::M2 {
+                        message,
+                        commitments,
+                        ..
+                    } => {
+                        crate::node::policy_refusal(
+                            &self.policy,
+                            request.session,
+                            self.share.index,
+                            commitments.iter().map(|(index, _)| *index).collect(),
+                            message.clone(),
+                        )
+                        .await
+                    }
+                    _ => None,
+                };
+                match refusal {
+                    Some(reason) => Body::PolicyRefused { reason },
+                    None => self.respond(request.session, request.body),
+                }
             };
             self.stats.record(&body);
             Some(Frame {

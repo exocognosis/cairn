@@ -115,10 +115,11 @@ pub async fn run_signer(listener: TcpListener, node: SignerNode, delay: Duration
 
 pub async fn run_root(
     listener: TcpListener,
-    node: RootNode,
+    mut node: RootNode,
     delay: Duration,
     tls: Arc<TlsIdentity>,
 ) {
+    node.tls = Some(tls.clone());
     serve(listener, Arc::new(node), delay, tls).await
 }
 

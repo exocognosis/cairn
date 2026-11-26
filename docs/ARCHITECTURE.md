@@ -69,13 +69,14 @@ latency and maturity favour the flat protocol.
 
 - **Resharing and share refresh**: `reshare` returns `Unsupported` on every backend. See
   BLOCKERS.md.
-- **Richer organization rules**: `--policy org` covers approvals and an audit log. Limits,
-  roles, single-use approvals and approver revocation do not exist.
+- **Richer organization rules**: `--policy org` covers approvals, a use window, removing an
+  approver while running, and an audit log. Limits and roles do not exist.
 - **The networked tower is less hardened than the flat committee.** Its signers and root
   engines take the same `--policy` flags as a committee party, and a signer's share is bound
-  to the message that signer approved. The three root engines still take the active set and
-  the check values from the coordinator, and the multi-party computation between them is a
-  clear-text stand-in.
+  to the message that signer approved. The three root engines run the mask phase only
+  after each has the other two's signature on the same session (message, active set,
+  engines, check values). The multi-party computation between them is still a clear-text
+  stand-in, and no policy state is shared between a signer and the engines.
 - **No built-in integrations, by design.** A chain's validator set, a directory, a finality
   check or a rule system attaches through a command or local service ([HOOKS.md](HOOKS.md)).
   A changed roster does not change a running committee (that needs resharing).

@@ -5,7 +5,7 @@ use std::fmt;
 use std::str::FromStr;
 use threshold_mldsa::{Active, AdditiveShare, Path};
 
-pub const NET_VERSION: u8 = 4;
+pub const NET_VERSION: u8 = 5;
 /// Largest accepted frame (a share-check reply carries nine 6 kB values).
 pub const MAX_FRAME: usize = 16 << 20;
 
@@ -128,14 +128,18 @@ pub enum Body {
     Collect {
         active: Active,
     },
-    /// To a root engine: its MPC party slot and the three engines' verification shares.
+    /// To a root engine: its MPC party slot, the three engines in slot order, and their
+    /// verification shares.
     Install {
         slot: u8,
+        roots: Vec<u8>,
         verification: Vec<Vec<i32>>,
     },
     /// Round 2 (challenge): run the mask phase for `attempt`, report the opened `c~`.
+    /// With it, each engine's attestation to the session it installed, by engine number.
     Mask {
         attempt: u32,
+        attestations: Vec<(u8, Attestation)>,
     },
     /// Rounds 3 and 4 (masked response, hint/carry): run the response phase, report the verdict.
     Finish,
@@ -192,7 +196,11 @@ pub enum Body {
         values: Vec<(Path, Vec<i32>)>,
         missing: Vec<Path>,
     },
-    Installed,
+    /// The engine installed its share and signs the session it was shown
+    /// ([`crate::node::session_statement`]).
+    Installed {
+        attestation: Attestation,
+    },
     Challenge {
         c_tilde: Vec<u8>,
     },
@@ -237,7 +245,7 @@ impl Body {
             Body::DealFailed { .. } => "DealFailed",
             Body::Ack => "Ack",
             Body::ShareCheck { .. } => "ShareCheck",
-            Body::Installed => "Installed",
+            Body::Installed { .. } => "Installed",
             Body::Challenge { .. } => "Challenge",
             Body::Verdict(_) => "Verdict",
             Body::Refused { .. } => "Refused",

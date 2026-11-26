@@ -424,14 +424,21 @@ impl Coordinator {
 
         let install = |i: usize| Body::Install {
             slot: i as u8 + 1,
+            roots: roots.clone(),
             verification: verification.clone(),
         };
+        // Each engine signs the session it installed; the others check before masking.
+        let mut attestations = Vec::new();
         for (id, reply) in engines
             .iter()
             .zip(self.ask_all(&report, &engines, session, install, rt).await)
         {
             match reply {
-                Ok(Body::Installed) => {}
+                Ok(Body::Installed { attestation }) => {
+                    if let NodeId::Root(k) = id {
+                        attestations.push((*k, attestation));
+                    }
+                }
                 Ok(other) => faults.push(fault(*id, NetFaultKind::Refused(other.kind().into()))),
                 Err(f) => faults.push(f),
             }
@@ -453,7 +460,10 @@ impl Coordinator {
                     &report,
                     &engines,
                     session,
-                    |_| Body::Mask { attempt: *attempt },
+                    |_| Body::Mask {
+                        attempt: *attempt,
+                        attestations: attestations.clone(),
+                    },
                     mpc,
                 )
                 .await;

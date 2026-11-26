@@ -60,14 +60,20 @@ approvers, lists one key under two names, or uses a name with characters other t
 
 ## Limits
 
-- **No signing count.** An approved payload can be signed any number of times until the
-  approval expires. Each run gives a valid signature of the same bytes, so this leaks
-  nothing new, but the policy does not make an approval single-use.
+- **A use window, not a signing count.** With `"use_window_secs": <n>` in the rule file, a
+  party authorizes a payload for `n` seconds from the first time it does so and refuses it
+  afterwards, even if the approvals have not expired. It is a window rather than a single
+  use because one request can take several sessions. The first use is a file
+  `<payload digest>.used` beside the approvals; whoever can delete it can reopen the window.
+  Without the setting, an approved payload can be signed until its approvals expire. A
+  signature already made stays valid, and the KMS endpoint may repeat it from its cache.
 - **The payload is opaque.** There are no amount limits, roles, or rules about content. What
   an approver approves is a digest; they must look at the payload themselves.
-- **Approver keys are files.** There is no hardware token, login, or revocation list.
-  Removing an approver means editing the rule file on every party and restarting it.
+- **Approver keys are files.** There is no hardware token or login. To remove an approver,
+  edit the rule file on every party: each party reads the file again when it changes, and
+  the removed approver's approvals stop counting at once. A rule file that is missing or
+  not valid makes the party refuse everything until it is fixed.
 - **Delivery is yours.** cairn does not move approval files to the parties.
 - **Clocks.** Expiry uses each party's own clock.
-- **Flat protocol only.** The tower's network nodes accept a policy in code but the CLI
-  starts them with the checkpoint format check.
+- **Tested on the flat committee.** Tower signers and root engines take `--policy org` too,
+  but no test runs an organization rule on tower processes.
