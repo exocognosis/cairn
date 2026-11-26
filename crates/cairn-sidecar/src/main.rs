@@ -38,6 +38,7 @@ Multi-process cluster:
              [--share <file>]            (signer)
              [--mpc-socket-dir <dir>]    (root: MPC backend party sockets)
              [--round-timeout-ms <n>] [--mpc-timeout-ms <n>] [--link-delay-ms <n>] [--fault <mode>]
+             [--policy format|checkpoint|org|hook]   (default format; flags as for a party)
   cairn node --role party ... [--policy checkpoint|org]
              checkpoint (default): [--chains <caip2,...>] [--state <file>] [--audit-log <file>]
              org: --org-rule <rule.json> --approvals <dir> [--audit-log <file>]
@@ -136,6 +137,91 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 
 /// The committee's shape, from `--members <file>` (a roster: who is on the committee) or
 /// `--committee T-of-N`. With a roster, party `k` is its `k`-th member.
+/// The policy a node runs, from its flags: `--policy`, its files, and any external checks.
+/// `default` is the policy when `--policy` is absent.
+fn node_policy(
+    args: &[String],
+    id: &str,
+    pk: &[u8; 1952],
+    default: &str,
+) -> Result<Box<dyn cairn_policy::PolicyEngine>, String> {
+    let audit_log = arg(args, "--audit-log").map(PathBuf::from);
+    let chosen = arg(args, "--policy").unwrap_or_else(|| default.to_owned());
+    let policy: Box<dyn cairn_policy::PolicyEngine> = match chosen.as_str() {
+        "checkpoint" => {
+            let policy = cairn_net::policy::Policy::open(
+                pk,
+                cairn_net::policy::PolicyConfig {
+                    chains: arg(args, "--chains")
+                        .map(|c| c.split(',').map(|x| x.trim().to_owned()).collect()),
+                    state_file: arg(args, "--state").map(PathBuf::from),
+                    audit_log,
+                },
+            )
+            .map_err(|e| format!("signing policy state: {e}"))?;
+            if arg(args, "--state").is_none() {
+                eprintln!("cairn node {id}: no --state file; the last signed height is forgotten on restart");
+            }
+            Box::new(cairn_policy::PosCheckpointPolicy::from(policy))
+        }
+        "org" => {
+            let rule =
+                arg(args, "--org-rule").ok_or("--policy org needs --org-rule <rule.json>")?;
+            let approvals =
+                arg(args, "--approvals").ok_or("--policy org needs --approvals <dir>")?;
+            if audit_log.is_none() {
+                eprintln!("cairn node {id}: no --audit-log; approval decisions are not recorded");
+            }
+            let config = cairn_policy::org::OrgConfig::load(
+                &PathBuf::from(rule),
+                PathBuf::from(approvals),
+                audit_log,
+            )?;
+            eprintln!(
+                "cairn node {id}: organization policy, {} of {} approvers",
+                config.required,
+                config.approvers.len()
+            );
+            Box::new(cairn_policy::OrgGovernancePolicy::new(pk, config)?)
+        }
+        "hook" => Box::new(cairn_policy::Unrestricted),
+        // The format check alone: a well-formed checkpoint, no memory of heights.
+        "format" => Box::new(cairn_policy::pos::CheckpointPrefix),
+        other => {
+            return Err(format!(
+                "unknown --policy {other:?} (checkpoint, format, org or hook)"
+            ))
+        }
+    };
+    // External checks the operator attached. They are asked first, so a policy
+    // that remembers what it signed records only what they allowed.
+    let hook_timeout = Duration::from_millis(ms(args, "--policy-timeout-ms", 2000)?);
+    let mut checks: Vec<Box<dyn cairn_policy::PolicyEngine>> = Vec::new();
+    if let Some(line) = arg(args, "--policy-command") {
+        checks.push(Box::new(
+            cairn_policy::CommandPolicy::parse(&line, hook_timeout)
+                .ok_or("--policy-command is empty")?,
+        ));
+        eprintln!("cairn node {id}: every request is also put to the command {line:?}");
+    }
+    if let Some(url) = arg(args, "--policy-url") {
+        checks.push(Box::new(cairn_policy::WebhookPolicy::new(
+            &url,
+            hook_timeout,
+        )?));
+        eprintln!("cairn node {id}: every request is also put to {url}");
+    }
+    if checks.is_empty() && chosen == "hook" {
+        return Err("--policy hook needs --policy-command or --policy-url".into());
+    }
+    Ok(if checks.is_empty() {
+        policy
+    } else {
+        checks.push(policy);
+        Box::new(cairn_policy::AllOf(checks))
+    })
+}
+
 fn committee_shape(
     args: &[String],
 ) -> Result<(usize, usize, Option<cairn_core::Roster>, String), String> {
@@ -615,78 +701,7 @@ fn run(args: &[String]) -> Result<(), String> {
                         .await
                         .map_err(|e| format!("bind {bind}: {e}"))?;
                     eprintln!("cairn node {id}: committee party on {bind}");
-                    let audit_log = arg(args, "--audit-log").map(PathBuf::from);
-                    let policy: Box<dyn cairn_policy::PolicyEngine> = match arg(args, "--policy")
-                        .as_deref()
-                    {
-                        None | Some("checkpoint") => {
-                            let policy = cairn_net::policy::Policy::open(
-                                &key.pk,
-                                cairn_net::policy::PolicyConfig {
-                                    chains: arg(args, "--chains").map(|c| {
-                                        c.split(',').map(|x| x.trim().to_owned()).collect()
-                                    }),
-                                    state_file: arg(args, "--state").map(PathBuf::from),
-                                    audit_log,
-                                },
-                            )
-                            .map_err(|e| format!("signing policy state: {e}"))?;
-                            if arg(args, "--state").is_none() {
-                                eprintln!("cairn node {id}: no --state file; the last signed height is forgotten on restart");
-                            }
-                            Box::new(cairn_policy::PosCheckpointPolicy::from(policy))
-                        }
-                        Some("org") => {
-                            let rule = arg(args, "--org-rule")
-                                .ok_or("--policy org needs --org-rule <rule.json>")?;
-                            let approvals = arg(args, "--approvals")
-                                .ok_or("--policy org needs --approvals <dir>")?;
-                            if audit_log.is_none() {
-                                eprintln!("cairn node {id}: no --audit-log; approval decisions are not recorded");
-                            }
-                            let config = cairn_policy::org::OrgConfig::load(
-                                &PathBuf::from(rule),
-                                PathBuf::from(approvals),
-                                audit_log,
-                            )?;
-                            eprintln!(
-                                "cairn node {id}: organization policy, {} of {} approvers",
-                                config.required,
-                                config.approvers.len()
-                            );
-                            Box::new(cairn_policy::OrgGovernancePolicy::new(&key.pk, config)?)
-                        }
-                        Some("hook") => Box::new(cairn_policy::Unrestricted),
-                        Some(other) => {
-                            return Err(format!(
-                                "unknown --policy {other:?} (checkpoint, org or hook)"
-                            ))
-                        }
-                    };
-                    // External checks the operator attached. They are asked first, so a policy
-                    // that remembers what it signed records only what they allowed.
-                    let hook_timeout = Duration::from_millis(ms(args, "--policy-timeout-ms", 2000)?);
-                    let mut checks: Vec<Box<dyn cairn_policy::PolicyEngine>> = Vec::new();
-                    if let Some(line) = arg(args, "--policy-command") {
-                        checks.push(Box::new(
-                            cairn_policy::CommandPolicy::parse(&line, hook_timeout)
-                                .ok_or("--policy-command is empty")?,
-                        ));
-                        eprintln!("cairn node {id}: every request is also put to the command {line:?}");
-                    }
-                    if let Some(url) = arg(args, "--policy-url") {
-                        checks.push(Box::new(cairn_policy::WebhookPolicy::new(&url, hook_timeout)?));
-                        eprintln!("cairn node {id}: every request is also put to {url}");
-                    }
-                    if checks.is_empty() && arg(args, "--policy").as_deref() == Some("hook") {
-                        return Err("--policy hook needs --policy-command or --policy-url".into());
-                    }
-                    let policy: Box<dyn cairn_policy::PolicyEngine> = if checks.is_empty() {
-                        policy
-                    } else {
-                        checks.push(policy);
-                        Box::new(cairn_policy::AllOf(checks))
-                    };
+                    let policy = node_policy(args, &id.to_string(), &key.pk, "checkpoint")?;
                     let mut node = cairn_net::PartyNode::new(
                         id,
                         Arc::new(key),
@@ -698,10 +713,9 @@ fn run(args: &[String]) -> Result<(), String> {
                     node.mask_ttl = Duration::from_secs(ms(args, "--mask-ttl-s", 120)?);
                     if let Some(addr) = arg(args, "--metrics-listen") {
                         let stats = node.stats.clone();
-                        let at = cairn_sidecar::kms::serve_text_metrics(&addr, move || {
-                            stats.render()
-                        })
-                        .map_err(|e| format!("metrics on {addr}: {e}"))?;
+                        let at =
+                            cairn_sidecar::kms::serve_text_metrics(&addr, move || stats.render())
+                                .map_err(|e| format!("metrics on {addr}: {e}"))?;
                         eprintln!("cairn node {id}: metrics on http://{at}/metrics");
                     }
                     cairn_net::flat::run_party(listener, node, delay).await;
@@ -726,6 +740,10 @@ fn run(args: &[String]) -> Result<(), String> {
                 .enable_all()
                 .build()
                 .map_err(|e| e.to_string())?;
+            // Signers and root engines take the same policy flags as a committee party; with
+            // none they run the checkpoint format check, as before.
+            let policy: Arc<dyn cairn_policy::PolicyEngine> =
+                Arc::from(node_policy(args, &id.to_string(), &group.pk, "format")?);
             runtime.block_on(async {
                 let listener = tokio::net::TcpListener::bind(&bind)
                     .await
@@ -748,7 +766,8 @@ fn run(args: &[String]) -> Result<(), String> {
                                 peers,
                                 link,
                                 fault,
-                                policy: cairn_net::node::default_policy(),
+                                policy,
+                                approved: Default::default(),
                             },
                             delay,
                         )
@@ -759,13 +778,9 @@ fn run(args: &[String]) -> Result<(), String> {
                             .ok_or("a root engine needs --mpc-socket-dir <dir>")?;
                         let mpc = Duration::from_millis(ms(args, "--mpc-timeout-ms", 30_000)?);
                         eprintln!("cairn node {id}: root engine on {bind}, MPC sockets in {dir}");
-                        net::run_root(
-                            listener,
-                            RootNode::new(id, group, fault, dir.into(), mpc),
-                            delay,
-                            link.tls.clone(),
-                        )
-                        .await;
+                        let mut root = RootNode::new(id, group, fault, dir.into(), mpc);
+                        root.policy = policy;
+                        net::run_root(listener, root, delay, link.tls.clone()).await;
                     }
                     _ => return Err(format!("--role {role} does not match --id {id}")),
                 }

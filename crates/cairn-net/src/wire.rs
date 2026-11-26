@@ -5,7 +5,7 @@ use std::fmt;
 use std::str::FromStr;
 use threshold_mldsa::{Active, AdditiveShare, Path};
 
-pub const NET_VERSION: u8 = 3;
+pub const NET_VERSION: u8 = 4;
 /// Largest accepted frame (a share-check reply carries nine 6 kB values).
 pub const MAX_FRAME: usize = 16 << 20;
 
@@ -117,9 +117,12 @@ pub enum Body {
         roots: Vec<u8>,
     },
     /// Signer to root engine, point to point: one additive sub-share.
+    /// `message` is the digest ([`crate::node::message_digest`]) of the message this signer
+    /// approved for the session; an engine holding another message refuses the share.
     SubShare {
         path: Path,
         share: AdditiveShare,
+        message: [u8; 32],
     },
     /// To a root engine: sum the sub-shares and publish the per-signer check values.
     Collect {

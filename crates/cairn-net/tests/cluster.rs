@@ -282,3 +282,67 @@ async fn links_are_mutually_authenticated() {
         "wrong server must fail the handshake"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_signer_deals_only_for_the_message_it_approved() {
+    use cairn_net::transport::call;
+    use cairn_net::{Body, Frame, Link};
+    use threshold_mldsa::Active;
+    let (cluster, _) = cluster(59, &[]).await;
+    let target = signer(1, 1);
+    let link = Link::new(
+        TIMEOUT,
+        Duration::ZERO,
+        cluster.identity(NodeId::Coordinator),
+    );
+    let ask = |to: NodeId, session: [u8; 32], body: Body| {
+        let (addr, link) = (cluster.peers[&to].clone(), link.clone());
+        async move {
+            let frame = Frame {
+                version: cairn_net::wire::NET_VERSION,
+                from: NodeId::Coordinator,
+                to,
+                session,
+                body,
+            };
+            call(&addr, &link, &frame).await.unwrap().reply.body
+        }
+    };
+    let leaves = (1..=3u8)
+        .map(|leaf| {
+            let members = (1..=3u8).map(|s| (s, Active::Signer)).collect();
+            (leaf, Active::Committee(members))
+        })
+        .collect();
+    let deal = Body::Deal {
+        active: Active::Committee(leaves),
+        roots: vec![1, 2, 3],
+    };
+
+    // No approval, no share: a coordinator cannot skip the signer's policy.
+    let reply = ask(target, [1; 32], deal.clone()).await;
+    assert!(
+        matches!(&reply, Body::Refused { reason } if reason.contains("no approved message")),
+        "{}",
+        reply.kind()
+    );
+
+    // The signer approves one message and the engines are told another: the engines refuse
+    // the signer's share, so nothing is signed that the signer did not agree to.
+    let session = [2; 32];
+    let prepare = |tag: &str| Body::Prepare {
+        message: message(tag),
+    };
+    let ready = ask(target, session, prepare("approved")).await;
+    assert!(matches!(ready, Body::Ready { .. }));
+    for root in 1..=3 {
+        let ready = ask(NodeId::Root(root), session, prepare("substituted")).await;
+        assert!(matches!(ready, Body::Ready { .. }));
+    }
+    let reply = ask(target, session, deal.clone()).await;
+    assert!(matches!(reply, Body::DealFailed { .. }), "{}", reply.kind());
+
+    // One approval deals once.
+    let reply = ask(target, session, deal).await;
+    assert!(matches!(reply, Body::Refused { .. }), "{}", reply.kind());
+}

@@ -71,8 +71,11 @@ latency and maturity favour the flat protocol.
   BLOCKERS.md.
 - **Richer organization rules**: `--policy org` covers approvals and an audit log. Limits,
   roles, single-use approvals and approver revocation do not exist.
-- **The tower's CLI nodes always run the checkpoint format check.** `SignerNode` and
-  `RootNode` take any `PolicyEngine` in code; no flag selects one.
+- **The networked tower is less hardened than the flat committee.** Its signers and root
+  engines take the same `--policy` flags as a committee party, and a signer's share is bound
+  to the message that signer approved. The three root engines still take the active set and
+  the check values from the coordinator, and the multi-party computation between them is a
+  clear-text stand-in.
 - **No built-in integrations, by design.** A chain's validator set, a directory, a finality
   check or a rule system attaches through a command or local service ([HOOKS.md](HOOKS.md)).
   A changed roster does not change a running committee (that needs resharing).

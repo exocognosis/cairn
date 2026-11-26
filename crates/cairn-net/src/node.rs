@@ -76,6 +76,32 @@ pub fn ready_binding(session: &[u8; 32], id: NodeId, group: &GroupPublic) -> [u8
     out
 }
 
+/// What a signer says it approved: a digest of the session and its message. It travels with
+/// every sub-share, so an engine only sums shares from signers that approved its message.
+pub fn message_digest(session: &[u8; 32], message: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    fips204::shake256(&[b"cairn/net-message/v1", session, message], &mut out);
+    out
+}
+
+/// Sessions a signer has approved a message for and not yet dealt in: session to digest.
+#[derive(Default)]
+pub struct Approved(Mutex<HashMap<[u8; 32], [u8; 32]>>);
+
+impl Approved {
+    fn insert(&self, session: [u8; 32], digest: [u8; 32]) {
+        let mut map = self.0.lock().expect("approved sessions");
+        if map.len() >= MAX_SESSIONS {
+            map.clear();
+        }
+        map.insert(session, digest);
+    }
+
+    fn take(&self, session: &[u8; 32]) -> Option<[u8; 32]> {
+        self.0.lock().expect("approved sessions").remove(session)
+    }
+}
+
 fn refused(reason: &str) -> Body {
     Body::Refused {
         reason: reason.into(),
@@ -110,6 +136,8 @@ pub struct SignerNode {
     pub fault: FaultMode,
     /// Asked before this signer agrees to a message.
     pub policy: Arc<dyn PolicyEngine>,
+    /// Messages this signer approved, by session. A share is dealt once per approval.
+    pub approved: Approved,
 }
 
 impl SignerNode {
@@ -120,6 +148,11 @@ impl SignerNode {
         roots: Vec<u8>,
     ) -> Body {
         let path = self.share.path.clone();
+        // No share leaves this signer for a session whose message its policy did not accept,
+        // and none leaves twice.
+        let Some(message) = self.approved.take(&session) else {
+            return refused("no approved message for this session");
+        };
         let mut distinct = roots.clone();
         distinct.sort();
         distinct.dedup();
@@ -152,6 +185,7 @@ impl SignerNode {
                 body: Body::SubShare {
                     path: path.clone(),
                     share,
+                    message,
                 },
             };
             async move {
@@ -187,14 +221,23 @@ impl Handler for SignerNode {
                 match request.body {
                     Body::Prepare { message } => {
                         match policy_refusal(&*self.policy, &request.session, &message) {
-                            None => Body::Ready {
-                                binding: ready_binding(&request.session, self.id, &self.group),
-                            },
+                            None => {
+                                self.approved.insert(
+                                    request.session,
+                                    message_digest(&request.session, &message),
+                                );
+                                Body::Ready {
+                                    binding: ready_binding(&request.session, self.id, &self.group),
+                                }
+                            }
                             Some(reason) => refused(&reason),
                         }
                     }
                     Body::Deal { active, roots } => self.deal(request.session, active, roots).await,
-                    Body::Abort => Body::Ack,
+                    Body::Abort => {
+                        self.approved.take(&request.session);
+                        Body::Ack
+                    }
                     _ => refused("unexpected request"),
                 }
             };
@@ -264,29 +307,29 @@ impl RootNode {
             .map(f)
     }
 
-    async fn backend(&self, slot: u8, request: Request) -> Result<mpc_bridge::Reply, Body> {
+    async fn backend(&self, slot: u8, request: Request) -> Result<mpc_bridge::Reply, Box<Body>> {
         let client = PartyClient::new(&self.mpc_socket_dir, slot as usize, self.mpc_timeout);
         match tokio::task::spawn_blocking(move || client.call(&request)).await {
             Ok(Ok(mpc_bridge::Reply::Fault {
                 code,
                 party,
                 message,
-            })) => Err(Body::BackendFault {
+            })) => Err(Box::new(Body::BackendFault {
                 blame: code == FAULT_BLAME,
                 party,
                 message,
-            }),
+            })),
             Ok(Ok(reply)) => Ok(reply),
-            Ok(Err(e)) => Err(Body::BackendFault {
+            Ok(Err(e)) => Err(Box::new(Body::BackendFault {
                 blame: false,
                 party: 0,
                 message: format!("MPC backend: {e}"),
-            }),
-            Err(e) => Err(Body::BackendFault {
+            })),
+            Err(e) => Err(Box::new(Body::BackendFault {
                 blame: false,
                 party: 0,
                 message: e.to_string(),
-            }),
+            })),
         }
     }
 
@@ -349,7 +392,7 @@ impl RootNode {
                 }
             }
             Ok(_) => refused("unexpected MPC reply"),
-            Err(fault) => fault,
+            Err(fault) => *fault,
         }
     }
 
@@ -385,7 +428,7 @@ impl RootNode {
                 z: z.to_vec(),
             }),
             Ok(_) => refused("unexpected MPC reply"),
-            Err(fault) => fault,
+            Err(fault) => *fault,
         }
     }
 
@@ -433,12 +476,19 @@ impl Handler for RootNode {
                         }
                     }
                 }
-                Body::SubShare { path, share } => {
+                Body::SubShare {
+                    path,
+                    share,
+                    message,
+                } => {
                     // Point to point from the signer that owns `path`.
                     if NodeId::from_path(&path) != Some(request.from) || !share.is_well_formed() {
                         refused("sub-share does not come from its signer")
                     } else {
                         self.with(&session, |s| {
+                            if message != message_digest(&session, &s.message) {
+                                return refused("sub-share is for another message");
+                            }
                             s.subs.insert(path, share);
                             Body::Ack
                         })

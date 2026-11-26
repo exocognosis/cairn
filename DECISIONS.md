@@ -619,3 +619,15 @@ inferred from the key material as before (`--committee` is flat, `--group` or no
 tower). With it, key material for the other engine is refused, and `--backend flat` with no
 peers runs an in-process committee for trying the API. The endpoint caches signatures by
 message, so a repeated request returns the same bytes on either engine.
+
+**D-121. A tower signer's share is bound to the message it approved.** A signer remembers
+the message its policy accepted for a session and deals once for it; every sub-share carries
+a digest of that session and message, and a root engine holding another message refuses the
+share. Before this a coordinator could ask signers to approve one message and the engines to
+sign another, or ask for a deal with no approval at all, so only the engines' policy counted.
+The frame changed, so the network version is 4; nodes of version 3 and 4 do not talk.
+
+**D-122. Tower nodes take the party's policy flags.** `cairn node --role signer|root` accepts
+`--policy checkpoint|format|org|hook` with the same files and hooks as a committee party.
+With no flag they run the format check as before (`format`), so existing deployments keep
+their behaviour.
