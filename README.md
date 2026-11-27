@@ -59,7 +59,7 @@ Each line is a test or a recorded run in this repository.
 | **Faults do not stall it.** Offline, stalled and misbehaving nodes are skipped or named and replaced. | Network tests with wall-clock deadlines. |
 | **Measured cost.** About 21 s per checkpoint across two hosts with real MPC; 0.12 s on one machine with a stand-in backend. | [Benchmarks](#benchmarks). |
 
-124 automated tests; `clippy` clean.
+126 automated tests; `clippy` clean.
 
 ## What it is not, yet
 

@@ -108,3 +108,24 @@ async fn certificates_rotate_and_revoke_without_an_authority() {
 
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_that_never_starts_tls_is_closed() {
+    use tokio::io::AsyncReadExt;
+    let dir = std::env::temp_dir().join(format!("cairn-tls-silent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    ClusterTls::generate(&[COORD, PARTY])
+        .unwrap()
+        .write(&dir)
+        .unwrap();
+    let addr = start(&dir).await;
+    let mut silent = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let mut byte = [0u8; 1];
+    let closed = tokio::time::timeout(Duration::from_secs(20), silent.read(&mut byte)).await;
+    assert!(
+        matches!(closed, Ok(Ok(0)) | Ok(Err(_))),
+        "the node kept a silent connection open"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

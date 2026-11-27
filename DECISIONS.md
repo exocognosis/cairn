@@ -788,3 +788,16 @@ Not fixed, recorded in docs/BLOCKERS.md item 18: a coordinator can lock a checkp
 having a far-future height signed or merely authorised; one party can veto by policy refusal;
 the KMS endpoint and the node listener read without a timeout; key-generation seeds and the
 trusted-dealer key are not erased; a party's clock set back reopens a use window.
+
+**D-142. Nothing waits for ever on a peer that has not proved who it is.** The review's one
+finding that needs no credentials. A request to the KMS endpoint with headers and a body of
+more than 1 KiB that never arrives stopped the single signing thread for every client (a test
+reproduced it; smaller bodies are read by the HTTP library on the connection's own thread and
+only held that). And the node listener waited without limit for a TLS handshake. Now: every
+socket the HTTP library accepts has a 10 s read and write timeout (second change in
+vendor/tiny_http); four threads read bodies against a 10 s deadline and hand only complete
+requests to the signing thread; the TLS front closes when either side is done instead of
+waiting for both; the node listener allows 10 s for the handshake. Not changed: connections
+between cluster nodes stay open while idle, because they are pooled and their peer is
+authenticated. Not solved: no limit on connections per client (docs/BLOCKERS.md item 18c).
+The TLS front's change is covered by the existing HTTPS test only; no test stalls it.

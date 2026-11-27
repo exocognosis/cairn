@@ -159,6 +159,44 @@ fn the_kms_endpoint_keeps_serving_after_garbage_requests() {
     );
 }
 
+#[test]
+fn a_request_that_never_sends_its_body_does_not_stop_the_endpoint() {
+    let roster = cairn_core::Roster::uniform(2, (1..=3).map(|i| format!("party-{i}")));
+    let endpoint =
+        cairn_sidecar::kms::serve("127.0.0.1:0", cairn_core::LocalFlat::deal(&roster).unwrap())
+            .unwrap();
+    let addr = endpoint.url().trim_start_matches("http://").to_owned();
+    // Headers that promise a body, then silence, with the connection held open.
+    let mut stalled = std::net::TcpStream::connect(&addr).unwrap();
+    stalled
+        .write_all(b"POST / HTTP/1.1\r\nHost: kms\r\nContent-Length: 5000\r\n\r\n")
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Another client is still served, and promptly.
+    let mut stream = std::net::TcpStream::connect(&addr).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(
+            b"POST / HTTP/1.1\r\nHost: kms\r\nX-Amz-Target: TrentService.GetPublicKey\r\n\
+        Content-Type: application/x-amz-json-1.1\r\nContent-Length: 22\r\nConnection: close\r\n\r\n\
+        {\"KeyId\":\"alias/cairn\"}",
+        )
+        .unwrap();
+    let mut reply = Vec::new();
+    let _ = stream.read_to_end(&mut reply);
+    let reply = String::from_utf8_lossy(&reply);
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    // And the silent connection is closed by the endpoint, not held for ever.
+    stalled
+        .set_read_timeout(Some(std::time::Duration::from_secs(25)))
+        .unwrap();
+    let mut rest = Vec::new();
+    let closed = stalled.read_to_end(&mut rest);
+    assert!(closed.is_ok(), "the endpoint kept a silent connection open");
+}
+
 /// Valid inputs for the coverage-guided fuzzer to start from (`scripts/fuzz.sh`).
 #[test]
 #[ignore = "writes fuzz seeds; run by scripts/fuzz.sh"]

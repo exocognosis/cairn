@@ -71,13 +71,35 @@ impl ServerTls {
                     std::time::Duration::from_secs(10),
                     acceptor.accept(stream),
                 );
-                let Ok(Ok(mut tls)) = handshake.await else {
+                let Ok(Ok(tls)) = handshake.await else {
                     return;
                 };
                 let Ok(mut inner) = tokio::net::TcpStream::connect(backend).await else {
                     return;
                 };
-                let _ = tokio::io::copy_bidirectional(&mut tls, &mut inner).await;
+                // The server behind closes a connection that is silent for 10 seconds; when
+                // it does, or when the client is done, this side closes too. Waiting for both
+                // directions to end would let a client hold the connection open by itself.
+                let (mut from_client, mut to_client) = tokio::io::split(tls);
+                let (mut from_server, mut to_server) = inner.split();
+                let request = async {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = tokio::io::copy(&mut from_client, &mut to_server).await;
+                    let _ = to_server.shutdown().await;
+                };
+                let reply = tokio::io::copy(&mut from_server, &mut to_client);
+                tokio::pin!(request, reply);
+                tokio::select! {
+                    _ = &mut request => {
+                        // The client finished sending: let the reply through, briefly.
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(30),
+                            &mut reply,
+                        )
+                        .await;
+                    }
+                    _ = &mut reply => {}
+                }
             });
         }
     }

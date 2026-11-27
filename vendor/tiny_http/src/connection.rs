@@ -51,6 +51,23 @@ pub(crate) enum Connection {
     #[cfg(unix)]
     Unix(unix_net::UnixStream),
 }
+impl Connection {
+    /// cairn: bound every read and write, so a silent client cannot hold a thread for ever.
+    pub(crate) fn set_timeouts(&self, limit: std::time::Duration) {
+        match self {
+            Self::Tcp(s) => {
+                let _ = s.set_read_timeout(Some(limit));
+                let _ = s.set_write_timeout(Some(limit));
+            }
+            #[cfg(unix)]
+            Self::Unix(s) => {
+                let _ = s.set_read_timeout(Some(limit));
+                let _ = s.set_write_timeout(Some(limit));
+            }
+        }
+    }
+}
+
 impl std::io::Read for Connection {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {

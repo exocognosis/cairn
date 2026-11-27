@@ -296,6 +296,8 @@ impl Server {
                 let new_client = match server.accept() {
                     Ok((sock, _)) => {
                         use util::RefinedTcpStream;
+                        // cairn: see CAIRN_PATCH.md.
+                        sock.set_timeouts(std::time::Duration::from_secs(10));
                         let (read_closable, write_closable) = match ssl {
                             None => RefinedTcpStream::new(sock),
                             #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]

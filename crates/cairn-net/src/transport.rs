@@ -178,6 +178,9 @@ pub trait Handler: Send + Sync + 'static {
     fn handle(&self, request: Frame) -> Reply<'_>;
 }
 
+/// How long an accepted connection has to complete its TLS handshake.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Accept connections forever; each carries any number of request/reply exchanges. A connection is served only if the
 /// client's certificate belongs to a cluster node and the frame's `from` is that node.
 pub async fn serve<H: Handler>(
@@ -194,7 +197,9 @@ pub async fn serve<H: Handler>(
         let (handler, tls) = (handler.clone(), tls.clone());
         tokio::spawn(async move {
             tcp.set_nodelay(true).ok();
-            let Ok(mut stream) = tls.acceptor().accept(tcp).await else {
+            // Until the handshake is done the peer is anybody: do not wait for it for ever.
+            let handshake = tokio::time::timeout(HANDSHAKE_TIMEOUT, tls.acceptor().accept(tcp));
+            let Ok(Ok(mut stream)) = handshake.await else {
                 return;
             };
             let Some(peer) = tls.peer(stream.get_ref().1.peer_certificates()) else {

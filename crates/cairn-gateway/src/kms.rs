@@ -41,6 +41,7 @@ pub struct KmsEndpoint {
     pub addr: SocketAddr,
     server: Arc<Server>,
     worker: Option<JoinHandle<()>>,
+    readers: Vec<JoinHandle<()>>,
     /// Runs the TLS front when one is configured; dropping it stops the front.
     front: Option<tokio::runtime::Runtime>,
 }
@@ -191,9 +192,39 @@ impl KmsEndpoint {
 
 impl Drop for KmsEndpoint {
     fn drop(&mut self) {
-        self.server.unblock();
+        // One call wakes one waiting thread.
+        for _ in 0..self.readers.len().max(1) {
+            self.server.unblock();
+        }
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
         if let Some(w) = self.worker.take() {
             let _ = w.join();
+        }
+    }
+}
+
+/// Threads that read request bodies.
+const BODY_READERS: usize = 4;
+/// How long a whole request body may take to arrive.
+const BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The request's body, at most 64 KiB, or `None` if it does not arrive in time. Each read is
+/// also bounded by the socket's own timeout (vendor/tiny_http/CAIRN_PATCH.md), so a client
+/// that sends a byte now and then is cut off at the deadline all the same.
+fn read_body(request: &mut tiny_http::Request) -> Option<Vec<u8>> {
+    let start = std::time::Instant::now();
+    let mut reader = request.as_reader().take(64 * 1024);
+    let (mut body, mut chunk) = (Vec::new(), [0u8; 4096]);
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => return Some(body),
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
+            Err(_) => return None,
+        }
+        if start.elapsed() > BODY_DEADLINE {
+            return None;
         }
     }
 }
@@ -360,26 +391,36 @@ pub fn serve_opts(
              configure credentials (--access-key-id) or bind to 127.0.0.1",
         ));
     }
+    // Bodies are read by their own threads, each against a deadline, and only complete
+    // requests reach the one thread that signs: a client that sends headers and then nothing
+    // costs a reader for a few seconds and never holds up signing.
+    let (complete, queue) = std::sync::mpsc::sync_channel::<(tiny_http::Request, Vec<u8>)>(64);
+    let readers = (0..BODY_READERS)
+        .map(|_| {
+            let (server, complete) = (server.clone(), complete.clone());
+            std::thread::spawn(move || {
+                for mut request in server.incoming_requests() {
+                    let Some(body) = read_body(&mut request) else {
+                        continue;
+                    };
+                    if complete.send((request, body)).is_err() {
+                        return;
+                    }
+                }
+            })
+        })
+        .collect();
+    drop(complete);
     let worker = {
-        let server = server.clone();
         std::thread::spawn(move || {
             let mut cache = Cache::new();
-            for mut request in server.incoming_requests() {
+            for (request, body) in queue {
                 let target = request
                     .headers()
                     .iter()
                     .find(|h| h.field.equiv("x-amz-target"))
                     .map(|h| h.value.as_str().to_owned())
                     .unwrap_or_default();
-                let mut body = Vec::new();
-                if request
-                    .as_reader()
-                    .take(64 * 1024)
-                    .read_to_end(&mut body)
-                    .is_err()
-                {
-                    continue;
-                }
                 metrics.requests.fetch_add(1, Ordering::Relaxed);
                 if let Some(auth) = &auth {
                     let headers: Vec<(String, String)> = request
@@ -435,6 +476,7 @@ pub fn serve_opts(
         addr,
         server,
         worker: Some(worker),
+        readers,
         front,
     })
 }
