@@ -273,7 +273,10 @@ impl PartyNode {
                     return refused("cannot sign the commitment set");
                 };
                 let attestation = Attestation { cert, signature };
-                let w = round1.reveal().iter().map(mithril::w_to_wire).collect();
+                let mut w: Vec<_> = round1.reveal().iter().map(mithril::w_to_wire).collect();
+                if self.fault == FaultMode::BadOpening {
+                    w[0][0] ^= 1;
+                }
                 sessions.insert(
                     session,
                     PartySession {
@@ -670,6 +673,28 @@ impl FlatCoordinator {
             round2.iter().map(|(i, (_, a))| (*i, a.clone())).collect();
         let wire_w: BTreeMap<u8, Vec<Vec<u8>>> =
             round2.into_iter().map(|(i, (w, _))| (i, w)).collect();
+        // A wrong opening would make every honest party refuse round 3; name its sender here
+        // so the refusals are not held against them.
+        let malformed = |i: &u8| {
+            vec![fault(
+                NodeId::Party(i + 1),
+                NetFaultKind::Refused("malformed value".into()),
+            )]
+        };
+        let mut revealed = BTreeMap::new();
+        for (i, ws) in &wire_w {
+            let ws: Option<Vec<PolyVec>> = ws.iter().map(|w| mithril::w_from_wire(w)).collect();
+            let ws = ws
+                .filter(|w| w.len() == self.key.params.reps)
+                .ok_or_else(|| malformed(i))?;
+            if !mithril::opening_matches(&self.key, *i, &ws, &mine[i].1) {
+                return Err(vec![fault(
+                    NodeId::Party(i + 1),
+                    NetFaultKind::Refused("opening does not match its commitment".into()),
+                )]);
+            }
+            revealed.insert(*i, ws);
+        }
         // Round 3, and in parallel round 1 of the next execution. Each party gets the others'
         // openings; it already holds its own.
         let (wire_z, _prefetched) = futures_util::future::join(
@@ -702,21 +727,6 @@ impl FlatCoordinator {
         .await;
         let wire_z = wire_z?;
 
-        let malformed = |i: &u8| {
-            vec![fault(
-                NodeId::Party(i + 1),
-                NetFaultKind::Refused("malformed value".into()),
-            )]
-        };
-        let mut revealed = BTreeMap::new();
-        for (i, ws) in &wire_w {
-            let ws: Option<Vec<PolyVec>> = ws.iter().map(|w| mithril::w_from_wire(w)).collect();
-            revealed.insert(
-                *i,
-                ws.filter(|w| w.len() == self.key.params.reps)
-                    .ok_or_else(|| malformed(i))?,
-            );
-        }
         let mut responses = BTreeMap::new();
         for (i, zs) in &wire_z {
             let zs: Option<Vec<Option<PolyVec>>> = zs

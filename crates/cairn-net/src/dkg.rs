@@ -192,6 +192,10 @@ pub struct DkgParty {
     session: Bytes32,
     ephemeral: BTreeMap<u8, agreement::EphemeralPrivateKey>,
     my_hello: Option<Hello>,
+    my_commit: Option<Commit>,
+    my_key_commit: Option<KeyCommit>,
+    /// The next step this run accepts; `DEAD` after any failure.
+    stage: u8,
     seeds: BTreeMap<Subset, Bytes32>,
     randomness: Bytes32,
     hellos: Vec<Hello>,
@@ -202,6 +206,9 @@ pub struct DkgParty {
     secrets: BTreeMap<Subset, (PolyVec, PolyVec)>,
     my_partials: Vec<(Subset, Vec<u8>)>,
 }
+
+/// A run that failed a step accepts no further step.
+const DEAD: u8 = u8::MAX;
 
 fn sorted<T: Clone>(mut v: Vec<T>, key: impl Fn(&T) -> u8) -> Vec<T> {
     v.sort_by_key(|x| key(x));
@@ -229,6 +236,9 @@ impl DkgParty {
             session,
             ephemeral: BTreeMap::new(),
             my_hello: None,
+            my_commit: None,
+            my_key_commit: None,
+            stage: 0,
             seeds: BTreeMap::new(),
             randomness: rand::random(),
             hellos: Vec::new(),
@@ -239,6 +249,27 @@ impl DkgParty {
             secrets: BTreeMap::new(),
             my_partials: Vec::new(),
         })
+    }
+
+    /// Steps run once each and in order. A step that fails ends the run: the caller starts
+    /// again with a new session.
+    fn enter(&mut self, stage: u8) -> Result<(), String> {
+        if self.stage != stage {
+            self.stage = DEAD;
+            return Err("key generation step out of order".into());
+        }
+        self.stage = DEAD;
+        Ok(())
+    }
+
+    /// True if `subsets` are exactly the subsets `leader` leads, each once.
+    fn leads_exactly<'a>(&self, leader: u8, subsets: impl Iterator<Item = &'a Subset>) -> bool {
+        let mut got: Vec<&Subset> = subsets.collect();
+        got.sort();
+        let all = self.roster.subsets();
+        let mut expect: Vec<&Subset> = all.iter().filter(|s| s[0] == leader).collect();
+        expect.sort();
+        got == expect
     }
 
     fn check_set<T>(
@@ -263,6 +294,7 @@ impl DkgParty {
 
     /// Round 0.
     pub fn hello(&mut self) -> Result<Hello, String> {
+        self.enter(0)?;
         let rng = SystemRandom::new();
         let mut ephemeral = Vec::new();
         for peer in (0..self.roster.n() as u8).filter(|p| *p != self.index) {
@@ -284,11 +316,13 @@ impl DkgParty {
             signature: self.identity.pair.sign(&message).as_ref().to_vec(),
         };
         self.my_hello = Some(hello.clone());
+        self.stage = 1;
         Ok(hello)
     }
 
     /// Round 1: verify everyone's hello, seal seeds for the subsets we lead, commit to `r`.
     pub fn commit(&mut self, hellos: Vec<Hello>) -> Result<Commit, String> {
+        self.enter(1)?;
         let hellos = sorted(hellos, |h| h.index);
         self.check_set(&hellos, |h| h.index, self.my_hello.as_ref())?;
         let roster_digest = self.roster.digest();
@@ -339,17 +373,21 @@ impl DkgParty {
             sealed.push((peer, plaintext));
         }
         self.hellos = hellos;
-        Ok(Commit {
+        let commit = Commit {
             index: self.index,
             commitment: commit_randomness(self.index, &self.randomness),
             sealed,
-        })
+        };
+        self.my_commit = Some(commit.clone());
+        self.stage = 2;
+        Ok(commit)
     }
 
     /// Round 2: open the seeds sent to us, then reveal `r`.
     pub fn reveal(&mut self, commits: Vec<Commit>) -> Result<Reveal, String> {
+        self.enter(2)?;
         let commits = sorted(commits, |c| c.index);
-        self.check_set(&commits, |c| c.index, None)?;
+        self.check_set(&commits, |c| c.index, self.my_commit.as_ref())?;
         for leader in 0..self.index {
             let led: Vec<Subset> = self
                 .roster
@@ -399,6 +437,7 @@ impl DkgParty {
             }
         }
         self.commits = commits;
+        self.stage = 3;
         Ok(Reveal {
             index: self.index,
             randomness: self.randomness,
@@ -407,8 +446,13 @@ impl DkgParty {
 
     /// Round 3: check the openings, derive every secret we hold, commit to the `t_S` we lead.
     pub fn key_commit(&mut self, reveals: Vec<Reveal>) -> Result<KeyCommit, String> {
+        self.enter(3)?;
         let reveals = sorted(reveals, |r| r.index);
-        self.check_set(&reveals, |r| r.index, None)?;
+        let mine = Reveal {
+            index: self.index,
+            randomness: self.randomness,
+        };
+        self.check_set(&reveals, |r| r.index, Some(&mine))?;
         for (r, c) in reveals.iter().zip(&self.commits) {
             if commit_randomness(r.index, &r.randomness) != c.commitment {
                 return Err(format!(
@@ -430,10 +474,13 @@ impl DkgParty {
             self.secrets.insert(subset.clone(), secret);
         }
         self.reveals = reveals;
-        Ok(KeyCommit {
+        let key_commit = KeyCommit {
             index: self.index,
             commitments,
-        })
+        };
+        self.my_key_commit = Some(key_commit.clone());
+        self.stage = 4;
+        Ok(key_commit)
     }
 
     fn transcript(&self) -> Bytes32 {
@@ -455,8 +502,20 @@ impl DkgParty {
     /// Round 4: check that every leader committed to the `t_S` we can compute ourselves, then
     /// publish ours and sign the transcript.
     pub fn key_reveal(&mut self, key_commits: Vec<KeyCommit>) -> Result<KeyReveal, String> {
+        self.enter(4)?;
         let key_commits = sorted(key_commits, |k| k.index);
-        self.check_set(&key_commits, |k| k.index, None)?;
+        self.check_set(&key_commits, |k| k.index, self.my_key_commit.as_ref())?;
+        // A party commits for the subsets it leads and for nothing else: a commitment under
+        // any other subset, or a second one for the same subset, would add a term to the
+        // public key that no share accounts for.
+        for k in &key_commits {
+            if !self.leads_exactly(k.index, k.commitments.iter().map(|(s, _)| s)) {
+                return Err(format!(
+                    "party {} did not commit for exactly the subsets it leads",
+                    k.index + 1
+                ));
+            }
+        }
         for subset in self.roster.subsets() {
             let leader = subset[0];
             let committed = key_commits[leader as usize]
@@ -482,6 +541,7 @@ impl DkgParty {
             }
         }
         self.key_commits = key_commits;
+        self.stage = 5;
         let message = final_bytes(&self.transcript(), self.index, &self.my_partials);
         Ok(KeyReveal {
             index: self.index,
@@ -492,9 +552,13 @@ impl DkgParty {
 
     /// Final step: verify every signature and opening, and assemble the public key and this
     /// party's share.
-    pub fn finish(self, key_reveals: Vec<KeyReveal>) -> Result<(GroupKey, PartyKey), String> {
+    pub fn finish(mut self, key_reveals: Vec<KeyReveal>) -> Result<(GroupKey, PartyKey), String> {
+        self.enter(5)?;
         let key_reveals = sorted(key_reveals, |k| k.index);
         self.check_set(&key_reveals, |k| k.index, None)?;
+        if key_reveals[self.index as usize].partial != self.my_partials {
+            return Err("our own message was altered in transit".into());
+        }
         let transcript = self.transcript();
         let mut t_full = fips204::vec_zero(K);
         let mut subset_keys = BTreeMap::new();
@@ -504,7 +568,9 @@ impl DkgParty {
                 .verify(&message, &reveal.signature)
                 .map_err(|_| format!("party {} signed a different transcript", reveal.index + 1))?;
             let committed = &self.key_commits[reveal.index as usize].commitments;
-            if reveal.partial.len() != committed.len() {
+            if reveal.partial.len() != committed.len()
+                || !self.leads_exactly(reveal.index, reveal.partial.iter().map(|(s, _)| s))
+            {
                 return Err(format!(
                     "party {} revealed the wrong number of partial keys",
                     reveal.index + 1
@@ -909,5 +975,102 @@ mod tests {
             err.contains("party 3 signed a different transcript"),
             "{err}"
         );
+    }
+
+    /// Runs the rounds up to the partial-key commitments.
+    #[allow(clippy::type_complexity)]
+    fn to_key_commit(p: &mut [DkgParty]) -> (Vec<Hello>, Vec<Commit>, Vec<Reveal>, Vec<KeyCommit>) {
+        let hellos: Vec<Hello> = p.iter_mut().map(|x| x.hello().unwrap()).collect();
+        let commits: Vec<Commit> = p
+            .iter_mut()
+            .map(|x| x.commit(hellos.clone()).unwrap())
+            .collect();
+        let reveals: Vec<Reveal> = p
+            .iter_mut()
+            .map(|x| x.reveal(commits.clone()).unwrap())
+            .collect();
+        let kc: Vec<KeyCommit> = p
+            .iter_mut()
+            .map(|x| x.key_commit(reveals.clone()).unwrap())
+            .collect();
+        (hellos, commits, reveals, kc)
+    }
+
+    #[test]
+    fn a_party_cannot_add_a_partial_key_for_a_subset_it_does_not_lead() {
+        // Party 3 commits to and opens an extra partial key under a subset party 1 leads.
+        // Without a check the public key would gain a term no honest share accounts for.
+        for own_subset_twice in [false, true] {
+            let mut p = setup(2, 3);
+            let (_, _, _, mut kc) = to_key_commit(&mut p);
+            let (subset, extra) = if own_subset_twice {
+                p[1].my_partials[0].clone()
+            } else {
+                p[0].my_partials[0].clone()
+            };
+            let cheat = if own_subset_twice { 1 } else { 2 };
+            kc[cheat]
+                .commitments
+                .push((subset.clone(), commit_partial(&subset, &extra)));
+            p[cheat].my_partials.push((subset, extra));
+            let reveals: Result<Vec<KeyReveal>, String> =
+                p.iter_mut().map(|x| x.key_reveal(kc.clone())).collect();
+            let outcome = reveals.and_then(|kr| p.remove(0).finish(kr).map(|_| ()));
+            assert!(outcome.is_err(), "extra partial key accepted");
+        }
+    }
+
+    #[test]
+    fn a_relay_cannot_replace_a_partys_own_randomness() {
+        // The relay swaps every commitment and opening for its own. Each party must notice
+        // that what comes back under its own index is not what it sent.
+        let mut p = setup(2, 3);
+        let hellos: Vec<Hello> = p.iter_mut().map(|x| x.hello().unwrap()).collect();
+        let mut commits: Vec<Commit> = p
+            .iter_mut()
+            .map(|x| x.commit(hellos.clone()).unwrap())
+            .collect();
+        for c in commits.iter_mut() {
+            c.commitment = commit_randomness(c.index, &[9; 32]);
+        }
+        assert!(p[0].reveal(commits).unwrap_err().contains("altered"));
+
+        let mut p = setup(2, 3);
+        let hellos: Vec<Hello> = p.iter_mut().map(|x| x.hello().unwrap()).collect();
+        let commits: Vec<Commit> = p
+            .iter_mut()
+            .map(|x| x.commit(hellos.clone()).unwrap())
+            .collect();
+        let mut reveals: Vec<Reveal> = p
+            .iter_mut()
+            .map(|x| x.reveal(commits.clone()).unwrap())
+            .collect();
+        reveals[0].randomness = [9; 32];
+        assert!(p[0].key_commit(reveals).unwrap_err().contains("altered"));
+    }
+
+    #[test]
+    fn steps_out_of_order_are_refused() {
+        // Skipping the opening round would leave nothing to check the randomness against.
+        let mut p = setup(2, 3);
+        let hellos: Vec<Hello> = p.iter_mut().map(|x| x.hello().unwrap()).collect();
+        let commits: Vec<Commit> = p
+            .iter_mut()
+            .map(|x| x.commit(hellos.clone()).unwrap())
+            .collect();
+        let reveals: Vec<Reveal> = (0..3)
+            .map(|i| Reveal {
+                index: i,
+                randomness: [9; 32],
+            })
+            .collect();
+        assert!(p[0].key_commit(reveals).unwrap_err().contains("order"));
+        // A step before its predecessor, and a step given twice.
+        let mut p = setup(2, 3);
+        assert!(p[0].reveal(commits.clone()).unwrap_err().contains("order"));
+        let mut p = setup(2, 3);
+        let hellos: Vec<Hello> = p.iter_mut().map(|x| x.hello().unwrap()).collect();
+        p[0].commit(hellos.clone()).unwrap();
+        assert!(p[0].commit(hellos).unwrap_err().contains("order"));
     }
 }

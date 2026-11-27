@@ -10,12 +10,11 @@
 //! Figure 10): replicated short secret sharing with a trusted dealer, `K` parallel repetitions,
 //! imbalanced hyperball rejection, public combine.
 //!
-//! **Prototype status.** Written from the paper, not checked against the authors' code. The
-//! hyperball sampler uses `f64` and Box-Muller and nothing is constant time. The share partition
+//! **Status.** Compared with the authors' reference implementation and signs with it in mixed
+//! committees; not reviewed by anyone outside. The hyperball sampler works in double-double
+//! arithmetic with branch-free elementary functions (docs/SAMPLER.md). The share partition
 //! uses the paper's tables, and distributed key generation (its Appendix D) lives in
-//! `cairn-net::dkg`. It shows that the approach produces
-//! standard signatures at the published parameters and what it costs; it is not a secure
-//! implementation.
+//! `cairn-net::dkg`.
 
 use crate::dd::Dd;
 use crate::fips204::{
@@ -504,14 +503,19 @@ pub(crate) fn ball_from_uniforms(radius: f64, uniforms: &[(Dd, Dd)]) -> Vec<Dd> 
     g
 }
 
-/// Two uniforms of 106 random bits each: the first on the odd multiples of 2^-107, so never
-/// 0 or 1 (its logarithm is taken), the second on the multiples of 2^-106 in `[0, 1)`.
+/// Two uniforms: the first with 105 random bits on odd multiples of 2^-107, so never 0 or 1
+/// (its logarithm is taken), the second with 106 on the multiples of 2^-106 in `[0, 1)`.
+/// The first drops one bit so that `2 b + 1` stays below 2^53 and is exact in a double; with
+/// all 53 bits it rounded, and could reach 1.
 fn uniform_pair<R: Rng + CryptoRng>(rng: &mut R) -> (Dd, Dd) {
     const STEP: f64 = 1.0 / (1u64 << 53) as f64;
     let mut bits = || (rng.next_u64() >> 11) as f64;
     let (a1, b1, a2, b2) = (bits(), bits(), bits(), bits());
     (
-        Dd::from_sum(a1 * STEP, (2.0 * b1 + 1.0) * (STEP * STEP * 0.5)),
+        Dd::from_sum(
+            a1 * STEP,
+            (2.0 * (b1 * 0.5).floor() + 1.0) * (STEP * STEP * 0.5),
+        ),
         Dd::from_sum(a2 * STEP, b2 * (STEP * STEP)),
     )
 }
@@ -565,6 +569,12 @@ fn commitment(pk: &[u8], index: u8, w: &[PolyVec]) -> [u8; 32] {
     out
 }
 
+/// Whether `w` is what `index` committed to. The coordinator checks this before round 3 so
+/// that a wrong opening is charged to its sender and not to the parties that refuse it.
+pub fn opening_matches(key: &GroupKey, index: u8, w: &[PolyVec], committed: &[u8; 32]) -> bool {
+    commitment(&key.pk, index, w) == *committed
+}
+
 impl PartyKey {
     /// Round 1: sample `K` masks, compute `w = A r1 + r2` for each, publish a commitment.
     pub fn round1<R: Rng + CryptoRng>(&self, key: &GroupKey, rng: &mut R) -> (Round1, [u8; 32]) {
@@ -585,7 +595,9 @@ impl PartyKey {
                 .map(|i| std::array::from_fn(|j| red(x[(L + i) * N + j].round())))
                 .collect();
             let mut r2 = r2;
-            let w = vec_add(&mat_vec_coeff(&key.a_hat, &r1), &r2);
+            let mut a_r1 = mat_vec_coeff(&key.a_hat, &r1);
+            let w = vec_add(&a_r1, &r2);
+            a_r1.zeroize();
             r2.zeroize();
             Mask { x, r1, w }
         };
@@ -634,11 +646,17 @@ impl PartyKey {
             return None;
         }
         let mine = recover_partition(&key.params, &active)?.remove(&self.index)?;
-        let (mut s1, mut s2) = (vec_zero(L), vec_zero(K));
+        // Summed in place and erased on every way out, the early return included.
+        let mut s1 = zeroize::Zeroizing::new(vec_zero(L));
+        let mut s2 = zeroize::Zeroizing::new(vec_zero(K));
         for subset in &mine {
             let (a, b) = self.shares.get(subset)?;
-            s1 = vec_add(&s1, a);
-            s2 = vec_add(&s2, b);
+            for (sum, part) in s1.iter_mut().zip(a) {
+                *sum = crate::fips204::poly_add(sum, part);
+            }
+            for (sum, part) in s2.iter_mut().zip(b) {
+                *sum = crate::fips204::poly_add(sum, part);
+            }
         }
         let mu = message_representative(&key.tr, &[], message);
         // nu^2 r^2: an integer below 2^53, so exact.

@@ -231,10 +231,15 @@ impl Policy {
             }
             Some((height, _)) if checkpoint.height == *height => {}
             _ => {
-                self.last
+                let before = self
+                    .last
                     .insert(checkpoint.chain.clone(), (checkpoint.height, digest));
                 if let Err(e) = self.persist() {
-                    self.last.remove(&checkpoint.chain);
+                    // Put back what was there: forgetting it would let a lower height through.
+                    match before {
+                        Some(entry) => self.last.insert(checkpoint.chain.clone(), entry),
+                        None => self.last.remove(&checkpoint.chain),
+                    };
                     return refuse(
                         self,
                         Some(&checkpoint),
@@ -311,6 +316,39 @@ mod tests {
         assert!(Checkpoint::parse(&[m.clone(), vec![0]].concat()).is_none());
         assert!(Checkpoint::parse(b"pqc-sidecar/checkpoint/v2 anything").is_none());
         assert!(Checkpoint::parse(&checkpoint(b"pk", "NotCaip2", 1, 1)).is_none());
+    }
+
+    #[test]
+    fn a_failed_write_does_not_forget_the_last_signed_height() {
+        let dir = std::env::temp_dir().join(format!("cairn-policy-w-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = PolicyConfig {
+            chains: None,
+            state_file: Some(dir.join("state.json")),
+            audit_log: None,
+        };
+        let s = [0u8; 32];
+        let mut policy = Policy::open(b"pk", config).unwrap();
+        assert!(policy
+            .authorize(&checkpoint(b"pk", "cosmos:hub-4", 100, 1), &s)
+            .is_ok());
+        // A directory where the temporary file goes makes the next write fail.
+        std::fs::create_dir(dir.join("state.tmp")).unwrap();
+        assert!(policy
+            .authorize(&checkpoint(b"pk", "cosmos:hub-4", 200, 1), &s)
+            .is_err());
+        std::fs::remove_dir(dir.join("state.tmp")).unwrap();
+        assert!(
+            policy
+                .authorize(&checkpoint(b"pk", "cosmos:hub-4", 50, 1), &s)
+                .is_err(),
+            "the height signed before the failed write still holds"
+        );
+        assert!(policy
+            .authorize(&checkpoint(b"pk", "cosmos:hub-4", 100, 2), &s)
+            .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -41,6 +41,8 @@ pub enum FaultMode {
     WrongChallenge,
     /// Root engine: give the MPC backend an inconsistent response share.
     BadResponse,
+    /// Committee party: open a different `w` than it committed to.
+    BadOpening,
 }
 
 impl std::str::FromStr for FaultMode {
@@ -53,6 +55,7 @@ impl std::str::FromStr for FaultMode {
             "bad-share" => FaultMode::BadShare,
             "wrong-challenge" => FaultMode::WrongChallenge,
             "bad-response" => FaultMode::BadResponse,
+            "bad-opening" => FaultMode::BadOpening,
             _ => return Err(format!("unknown fault mode {s:?}")),
         })
     }

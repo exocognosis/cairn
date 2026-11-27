@@ -759,3 +759,32 @@ run on 2026-11-27 on the M3:
   provenance statement to each archive; it first runs at the next tag.
 
 None of this is a review. Each is a measurement with a stated reach.
+
+**D-141. An automated review, and what it found.** Five independent model reviewers, one per
+question of docs/REVIEW_REQUEST.md, each told to report only what it could point to in code;
+every finding was then checked against the code before anything was changed. It is not a
+substitute for a person: the reviewers share blind spots with the author's tools. Fixed, with
+a test each:
+- *Key generation accepted partial keys it should not.* A party could commit to and open a
+  partial public key under a subset it does not lead, or twice under its own; every honest
+  party finished and wrote shares for a public key their shares do not add up to. Now a
+  party's commitments and openings must be exactly the subsets it leads.
+- *The relay could choose the shared randomness.* Parties did not compare what came back
+  under their own index with what they sent, so a coordinator could replace every commitment
+  and opening. Now each party checks its own entry in every round.
+- *Key generation steps could be skipped or repeated*, which skipped the check of the
+  randomness and could panic a node. Steps now run once, in order; a failed step ends the run.
+- *A failed state write made the checkpoint policy forget the last signed height.* It now
+  restores what was there.
+- *A wrong opening got the honest parties excluded.* They refuse round 3, and a refusal was
+  charged to the refuser. The coordinator now checks openings against commitments itself and
+  names the sender (`bad-opening` fault mode).
+- *Copies of the share and mask in freed memory*: the per-signature share sum, and the
+  transformed copies inside the multiply helpers, are now erased.
+- *The first uniform could round to 1* (probability about 2^-95 per mask; the mask would have
+  been refused, not leaked). It now has 105 bits and is exact. docs/SAMPLER.md corrected:
+  pair count, the per-signature mask count for large committees.
+Not fixed, recorded in docs/BLOCKERS.md item 18: a coordinator can lock a checkpoint chain by
+having a far-future height signed or merely authorised; one party can veto by policy refusal;
+the KMS endpoint and the node listener read without a timeout; key-generation seeds and the
+trusted-dealer key are not erased; a party's clock set back reopens a use window.

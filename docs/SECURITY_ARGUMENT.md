@@ -79,7 +79,8 @@ coordinator no more than running round 1 early in the paper's protocol would.
   timing, not content.
 - Single use: a party takes the named mask out of its pool before it does anything else in
   round 2; an unknown or already used name is refused; the session is deleted when round 3
-  is answered, refused, aborted, or 120 s old; unused masks are erased at 120 s
+  is answered, refused, aborted, or 120 s old; unused masks are erased at 120 s (both at
+  the first request after that time: an idle party keeps them until it is next asked)
   (`PartyNode::respond`). All of this state is in memory only, so a crash loses masks
   rather than reusing them.
 - The coordinator chooses which early commitment to use after seeing the message and after

@@ -129,6 +129,7 @@ fn fault_name(mode: FaultMode) -> &'static str {
         FaultMode::BadShare => "bad-share",
         FaultMode::WrongChallenge => "wrong-challenge",
         FaultMode::BadResponse => "bad-response",
+        FaultMode::BadOpening => "bad-opening",
     }
 }
 

@@ -124,6 +124,31 @@ async fn a_wrong_response_names_its_sender() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_wrong_opening_names_its_sender_and_not_the_parties_that_refuse_it() {
+    let (_committee, mut coordinator) =
+        committee(3, 4, &[(NodeId::Party(1), FaultMode::BadOpening)]).await;
+    let msg = checkpoint(&coordinator.key().pk, 100, "opening");
+    let (signature, report) = coordinator.sign(&msg).await.unwrap();
+    assert!(fips204::verify_standard(
+        &coordinator.key().pk,
+        &msg,
+        &signature
+    ));
+    assert!(report
+        .faults
+        .iter()
+        .all(|f| f.culprit == Some(NodeId::Party(1))));
+    assert_eq!(
+        coordinator.excluded().iter().collect::<Vec<_>>(),
+        vec![&NodeId::Party(1)]
+    );
+    assert_eq!(
+        report.signers,
+        vec![NodeId::Party(2), NodeId::Party(3), NodeId::Party(4)]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn too_few_parties_is_an_error_and_other_messages_are_refused() {
     let stalled = [
         (NodeId::Party(1), FaultMode::Stall),

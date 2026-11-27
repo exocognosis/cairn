@@ -203,20 +203,29 @@ pub fn mat_vec(a_hat: &MatrixHat, v_hat: &[Poly]) -> PolyVec {
 }
 
 /// `A * v` for `v` in the coefficient domain.
+/// `v` may be secret: the transformed copies are erased before they are freed.
 pub fn mat_vec_coeff(a_hat: &MatrixHat, v: &[Poly]) -> PolyVec {
-    vec_inv_ntt(&mat_vec(a_hat, &vec_ntt(v)))
+    use zeroize::Zeroize;
+    let mut v_hat = vec_ntt(v);
+    let mut product = mat_vec(a_hat, &v_hat);
+    let out = vec_inv_ntt(&product);
+    v_hat.zeroize();
+    product.zeroize();
+    out
 }
 
 /// `c * v` for a coefficient-domain `c` and `v`.
 pub fn challenge_mul(c: &Poly, v: &[Poly]) -> PolyVec {
+    use zeroize::Zeroize;
     let mut c_hat = *c;
     ntt(&mut c_hat);
-    vec_inv_ntt(
-        &vec_ntt(v)
-            .iter()
-            .map(|p| poly_pointwise(&c_hat, p))
-            .collect::<Vec<_>>(),
-    )
+    // `v` is a share when this is called from the response round.
+    let mut v_hat = vec_ntt(v);
+    let mut product: PolyVec = v_hat.iter().map(|p| poly_pointwise(&c_hat, p)).collect();
+    let out = vec_inv_ntt(&product);
+    v_hat.zeroize();
+    product.zeroize();
+    out
 }
 
 pub fn shake256(parts: &[&[u8]], out: &mut [u8]) {

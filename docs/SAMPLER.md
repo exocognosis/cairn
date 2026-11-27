@@ -9,8 +9,9 @@ ideal, how that was measured, and what is still not established. It concerns
 
 `crates/threshold-mldsa/src/mithril.rs` (`ball_from_uniforms`) and `dd.rs`:
 
-1. 2818 pairs of uniforms, 106 random bits each.
-2. One Gaussian per pair by Box-Muller: `sqrt(-2 ln u1) * cos(2 pi u2)`.
+1. 1409 pairs of uniforms: `u1` with 105 random bits, `u2` with 106.
+2. Two Gaussians per pair by Box-Muller: `sqrt(-2 ln u1)` times `cos(2 pi u2)` and
+   `sin(2 pi u2)`.
 3. Divide by the norm of all 2818, drop two, scale by the radius: a uniform point in the
    2816-dimensional ball. This is the method of the paper and of the authors' reference
    implementation.
@@ -47,11 +48,16 @@ Two sources:
   2e. With the measured errors, per mask of 2816 coordinates: about 4e-6 for `f64`, about
   7e-23 for double-double.
 - **Uniforms on a grid.** Perturbing `u1` by one grid step moves the Gaussian by
-  `step / (u1 sqrt(-2 ln u1))`, which averages to about 12 steps; `u2` matters less. Per
-  mask: about 1e-7 with 53-bit uniforms, about 2e-23 with 106-bit ones.
+  `step / (u1 sqrt(-2 ln u1))`, which averages to about 12 steps; the grid of `u2` and the
+  shared norm contribute terms of the same order, which the estimate covers only because it
+  counts a full step where the mean offset is a quarter of one. Per mask: about 1e-7 with
+  53-bit uniforms, about 3e-23 with these (`u1` has 105 bits, not 106: its low word must be
+  exact in a double).
 
 So the estimate is a distance of about **2^-18 per mask before, 2^-73 per mask now**. A
-signature uses a few dozen masks across parties, repetitions and retries.
+signature uses as many masks per party and attempt as the committee has repetitions: 5 for
+2-of-3, 20 for 3-of-4, and up to 1200 for 5-of-6. So per attempt and party the distance is
+about 2^-71 at 2-of-3 and about 2^-63 at 5-of-6.
 
 What this estimate is not:
 

@@ -66,7 +66,12 @@ adequate, and what is the most likely leak it would miss?
   above about 42% of that. One committee size, first moment only.
 - Coverage-guided fuzzing of every parser of bytes from the network or another party's file
   (`scripts/fuzz.sh`): 32 million inputs, no crash. Ten minutes per target is short.
-- Secrets are erased on drop in the protocol code.
+- An automated review by five independent model reviewers, one per question above. It found
+  three defects in key generation (an extra partial key accepted, the relay able to choose
+  the shared randomness, steps accepted out of order) and four elsewhere; those are fixed
+  with tests. What it found and was not fixed is docs/BLOCKERS.md item 18. It is not a
+  person's review and shares blind spots with the tools that wrote the code.
+- Secrets are erased on drop in the protocol code, with the exceptions in item 18.
 
 ## Known limits, not findings
 
