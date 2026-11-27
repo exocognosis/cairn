@@ -7,9 +7,9 @@ Run one cairn cluster across two machines:
 | **Mac** (Apple Silicon) | Leaf A: `leaf_1/signer_1..4`; `cairn serve-kms` (coordinator); `pqc-sidecar` |
 | **Linux** server | Leaves B to D: `leaf_2..4/signer_1..4`; root engines `root_1..4`; the MPC backend; CometBFT |
 
-**Status.** This split was run once, on 2026-11-24, between an Apple M3 and a Hetzner server in
+**Status.** This split was run on 2026-11-24 and again on 2026-11-26 (version 0.7.0), between an Apple M3 and a Hetzner server in
 Helsinki (178 ms apart), with the reference worker and with MP-SPDZ, including a stock
-pqc-sidecar signing a checkpoint; results are in the README. That run used the two scripts in
+pqc-sidecar signing a checkpoint; results are in the README. Both runs used the two scripts in
 `scripts/split-host/` with every node on loopback and SSH port forwards between the hosts
 (section 6). The direct-address layout in sections 2 to 4 uses the same binaries and flags but
 has not itself been run. `cairn mock-chain` stood in for CometBFT. Read the three notes first.
@@ -199,3 +199,9 @@ For MP-SPDZ pass a long MPC deadline: `local.sh start root@<server> 900000` and
 `remote-bench ... --mpc-timeout-ms 900000`. The KMS endpoint is on `127.0.0.1:18200` and the
 chain stand-in on `127.0.0.1:18657` for the pqc-sidecar configuration of section 4.
 `local.sh stop` and `remote.sh stop` end the run.
+
+For the MP-SPDZ phase costs (time, data per party, rounds, failures), copy
+`/root/cairn/logs/mpc-bridge.log` from the server and run
+`scripts/split-host/mpc-phases.py mpc-bridge.log`. `remote-bench` prints latency and rejected
+attempts per signature. Both hosts must run the same cairn version: nodes refuse peers on
+another wire version.

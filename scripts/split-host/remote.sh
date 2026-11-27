@@ -15,14 +15,16 @@ case "${1:-}" in
 stop)
   pkill -f "/root/cairn/cairn" 2>/dev/null || true
   pkill -f "bridge.py" 2>/dev/null || true
-  pkill -f "party.x" 2>/dev/null || true
+  # With the trailing space this matches a running party, not `make ...-party.x`.
+  pkill -f "party\.x " 2>/dev/null || true
   rm -rf "$SOCK"; echo stopped;;
 start)
   "$0" stop > /dev/null
   mkdir -p "$SOCK" logs
   if [ "${2:-reference}" = mpspdz ]; then
     MPC_MS=900000
-    (cd mp-spdz && MPSPDZ_DIR=/root/MP-SPDZ nohup ./run_bridge.sh "$SOCK" all 127.0.0.1 127.0.0.1 127.0.0.1 > ../logs/mpc-bridge.log 2>&1 &)
+    # The redirect covers the whole subshell, so nothing keeps the caller's output open.
+    (cd mp-spdz && MPSPDZ_DIR=/root/MP-SPDZ exec nohup ./run_bridge.sh "$SOCK" all 127.0.0.1 127.0.0.1 127.0.0.1) > logs/mpc-bridge.log 2>&1 &
   else
     nohup /root/cairn/cairn mpc-worker --socket-dir "$SOCK" > logs/mpc-worker.log 2>&1 &
   fi

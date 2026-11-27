@@ -660,3 +660,12 @@ coordinator returns that reason when the refusals cost it the quorum, and it doe
 exclude a node for refusing: a node that says no to one payload must still be asked about
 the next. Found by the first test that ran `--policy org` and a policy program on tower
 processes, which got "quorum lost" with the reasons dropped.
+
+**D-128. Third two-host run, 2026-11-26, version 0.7.0.** Same method as D-64 and D-75: a
+temporary Hetzner `cpx42` in Helsinki for about 50 minutes (one billed hour), deleted
+afterwards. Purpose: check that the tower's added checks did not slow signing (they did not;
+README). Two faults in `remote.sh` showed up and were fixed: `stop` killed a running
+`make replicated-field-party.x`, and `start mpspdz` kept the caller's output open so an SSH
+call never returned. `mpc-phases.py` was added to read the phase costs from the bridge log.
+The `remote.sh` fixes were made after the server was deleted and have not been run.
+

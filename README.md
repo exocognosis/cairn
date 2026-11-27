@@ -433,7 +433,24 @@ MP-SPDZ on that server, three parties on its loopback, over 103 attempts with no
 phase 1.72 s per attempt (1.48 s inside MP-SPDZ, 85 MB sent per party, 1,943 rounds), response
 phase 0.51 s (0.33 s, 15.7 MB, 93 rounds).
 
-In both configurations the stock pqc-sidecar on the Mac then called `GetPublicKey` and `Sign`,
+Repeated on 2026-11-26 with version 0.7.0, same hosts and layout (a new `cpx42`, round trip
+176 ms), to see what the tower's added checks cost (signers bound to the message they
+approved, root engines cross-signing each session):
+
+| MPC backend | certs | latency s (mean / p50 / p95 / max) | rejected attempts (mean) |
+|---|---|---|---|
+| reference worker | 50 | 6.2 / 5.4 / 10.3 / 16.0 | 3.96 |
+| MP-SPDZ `replicated-field-party.x` | 15 | 22.9 / 23.0 / 37.2 / 59.5 | 3.13 |
+
+No measurable cost: both rows are within the spread of the first run. MP-SPDZ over 73
+attempts with no failure (`scripts/split-host/mpc-phases.py` on the bridge log): mask phase
+3.14 s per attempt (2.82 s inside MP-SPDZ, 85.1 MB sent per party, 1,942 rounds), response
+phase 0.73 s (0.47 s, 15.6 MB, 87 rounds). The MPC phases were slower than on the first
+server at the same data and round counts, which points at the shared vCPUs, not the code. The
+stock pqc-sidecar signed height 100 in 14 s (reference) and 58 s (MP-SPDZ); `pqc-sidecar
+verify` accepted both certificates and rejected a tampered copy of each.
+
+In both configurations of the first run the stock pqc-sidecar on the Mac then called `GetPublicKey` and `Sign`,
 wrote the height-100 certificate, and `pqc-sidecar verify` accepted it; with MP-SPDZ a tampered
 copy was also checked and rejected.
 
