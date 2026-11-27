@@ -697,3 +697,11 @@ damaged input, and a live KMS endpoint is sent garbage and must keep serving. It
 nothing. Coverage-guided fuzzing (`cargo fuzz`) would go deeper; it needs a tool that is not
 installed here and a nightly compiler, so it is left as the next step.
 
+**D-134. A patched copy of `tiny_http` is carried in `vendor/`.** The hostile-input test
+passed on macOS and aborted on Linux CI: the HTTP library drains an unread request body into
+a buffer as large as the `Content-Length` header claims, so one unauthenticated request could
+stop the KMS endpoint, the metrics endpoint or the chain stand-in. cairn already read at most
+64 KiB of a body; the allocation was inside the library, on drop. The fix is one line, the
+library's last release is from 2022, and replacing it would touch three endpoints, so the
+release is vendored with that line changed (`vendor/tiny_http/CAIRN_PATCH.md`).
+

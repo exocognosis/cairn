@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/threshold-mldsa", "crates/cascade-tower", "crates/mpc-bridge", "crates/cairn-core", "crates/cairn-policy", "crates/cairn-net", "crates/cairn-gateway", "crates/cairn-sidecar"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.7.0"
@@ -44,3 +45,7 @@ codegen-units = 1
 
 [profile.test]
 opt-level = 2
+
+# tiny_http 0.12.0 with one fix: see vendor/tiny_http/CAIRN_PATCH.md.
+[patch.crates-io]
+tiny_http = { path = "vendor/tiny_http" }
