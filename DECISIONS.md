@@ -705,3 +705,24 @@ stop the KMS endpoint, the metrics endpoint or the chain stand-in. cairn already
 library's last release is from 2022, and replacing it would touch three endpoints, so the
 release is vendored with that line changed (`vendor/tiny_http/CAIRN_PATCH.md`).
 
+**D-135. First uses are one file outside the approvals directory, checked against memory.**
+The use window recorded a payload's first use as `<digest>.used` in the approvals directory,
+the one place a delivery process must be able to write, so deleting a file reopened a window.
+The record is now a single file beside the rule file (`--use-record` to move it), mode 0600.
+A running party keeps every entry in memory and refuses if the file no longer has one, or has
+it with a later time. An entry removed while the party is stopped is not noticed; that takes
+access that already reads the share. Old `.used` files are ignored: 0.7.0 was the only
+release with them.
+
+**D-136. The KMS signature cache forgets after 120 s.** The cache existed so that a
+client's retry of a slow request finds the finished signature. It also answered without any
+party's policy being asked, for as long as the process ran, which defeated a use window.
+Entries now expire (`--kms-cache-s`, default 120, 0 for none), and an answer from the cache
+no longer renews its entry.
+
+**D-137. The compiler version is pinned and the release build is repeatable.**
+`rust-toolchain.toml` names the compiler, so CI, releases and a checker's machine use the
+same one. `scripts/release-build.sh`, which the release workflow now runs, maps source paths
+out of the binary. Measured on macOS: the same build directory gives the same bytes; a
+different one changes 48 bytes, which looks like the linker's identifier and was not traced.
+Linux was not measured. docs/RELEASING.md says exactly this.

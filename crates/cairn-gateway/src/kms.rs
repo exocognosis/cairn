@@ -31,9 +31,11 @@ pub const SPKI_PREFIX: [u8; 22] = [
 /// Largest message KMS accepts with `MessageType = RAW`.
 pub const MAX_RAW_MESSAGE: usize = 4096;
 
-/// Finished signatures by message digest.
-type Cache = std::collections::HashMap<[u8; 32], Box<[u8; SIGNATURE_BYTES]>>;
+/// Finished signatures by message digest, with when each was made.
+type Cache = std::collections::HashMap<[u8; 32], (std::time::Instant, Box<[u8; SIGNATURE_BYTES]>)>;
 const SIGNATURE_CACHE: usize = 256;
+/// How long a finished signature answers repeats of its request unless told otherwise.
+pub const DEFAULT_CACHE_SECS: u64 = 120;
 
 pub struct KmsEndpoint {
     pub addr: SocketAddr,
@@ -52,6 +54,9 @@ pub struct KmsOptions {
     pub tls: Option<crate::tls::ServerTls>,
     /// Counters to update, usually also given to [`serve_metrics`].
     pub metrics: Option<Arc<Metrics>>,
+    /// For how many seconds a finished signature answers a repeat of its request without the
+    /// signers being asked again. `None` is [`DEFAULT_CACHE_SECS`]; 0 asks them every time.
+    pub cache_secs: Option<u64>,
 }
 
 /// Counters for the KMS endpoint, readable in Prometheus text format.
@@ -196,6 +201,7 @@ impl Drop for KmsEndpoint {
 fn handle(
     certifier: &mut dyn KmsSigner,
     cache: &mut Cache,
+    cache_ttl: std::time::Duration,
     metrics: &Metrics,
     target: &str,
     body: &[u8],
@@ -230,13 +236,14 @@ fn handle(
             if message.len() > MAX_RAW_MESSAGE {
                 return error("ValidationException", "Message longer than 4096 bytes");
             }
-            // Signing is deterministic, so a finished signature can answer any later request for
-            // the same message. pqc-sidecar's KMS client gives up on a call after a few seconds
-            // and retries; with a slow MPC backend the retry finds the result here instead of
-            // starting the session again.
+            // pqc-sidecar's KMS client gives up on a call after a few seconds and retries; with a
+            // slow MPC backend the retry finds the finished signature here instead of starting
+            // the session again. An answer from here does not ask the signers' policies, so it
+            // is kept only for `cache_ttl`: after that the signers decide again.
             let digest: [u8; 32] = Sha3_256::digest(&message).into();
+            cache.retain(|_, (made, _)| made.elapsed() < cache_ttl);
             let signed = match cache.get(&digest) {
-                Some(signature) => {
+                Some((_, signature)) => {
                     metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
                     Ok(**signature)
                 }
@@ -256,24 +263,24 @@ fn handle(
                         &metrics.sign_failures
                     };
                     outcome.fetch_add(1, Ordering::Relaxed);
+                    if let (Ok(signed), false) = (&signed, cache_ttl.is_zero()) {
+                        if cache.len() >= SIGNATURE_CACHE {
+                            cache.clear();
+                        }
+                        cache.insert(digest, (std::time::Instant::now(), Box::new(*signed)));
+                    }
                     signed
                 }
             };
             match signed {
-                Ok(signed) => {
-                    if cache.len() >= SIGNATURE_CACHE {
-                        cache.clear();
-                    }
-                    cache.insert(digest, Box::new(signed));
-                    (
-                        200,
-                        json!({
-                            "KeyId": key,
-                            "Signature": B64.encode(signed),
-                            "SigningAlgorithm": "ML_DSA_SHAKE_256",
-                        }),
-                    )
-                }
+                Ok(signed) => (
+                    200,
+                    json!({
+                        "KeyId": key,
+                        "Signature": B64.encode(signed),
+                        "SigningAlgorithm": "ML_DSA_SHAKE_256",
+                    }),
+                ),
                 // The tower could not sign (quorum lost, retries exhausted). Retryable.
                 Err(e) => (
                     500,
@@ -315,7 +322,13 @@ pub fn serve_opts(
     mut certifier: impl KmsSigner,
     options: KmsOptions,
 ) -> std::io::Result<KmsEndpoint> {
-    let KmsOptions { auth, tls, metrics } = options;
+    let KmsOptions {
+        auth,
+        tls,
+        metrics,
+        cache_secs,
+    } = options;
+    let cache_ttl = std::time::Duration::from_secs(cache_secs.unwrap_or(DEFAULT_CACHE_SECS));
     let metrics = metrics.unwrap_or_else(Metrics::new);
     let inner = if tls.is_some() { "127.0.0.1:0" } else { listen };
     let server = Arc::new(Server::http(inner).map_err(std::io::Error::other)?);
@@ -400,7 +413,14 @@ pub fn serve_opts(
                         continue;
                     }
                 }
-                let (status, value) = handle(&mut certifier, &mut cache, &metrics, &target, &body);
+                let (status, value) = handle(
+                    &mut certifier,
+                    &mut cache,
+                    cache_ttl,
+                    &metrics,
+                    &target,
+                    &body,
+                );
                 let header = Header::from_bytes("Content-Type", "application/x-amz-json-1.1")
                     .expect("static header");
                 let _ = request.respond(

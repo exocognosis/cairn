@@ -1,0 +1,5 @@
+# The compiler every build uses: CI, releases, and anyone checking a release binary.
+# Raise it deliberately, in its own commit.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

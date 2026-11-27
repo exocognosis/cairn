@@ -37,7 +37,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --locked -p cairn-sidecar --target ${{ matrix.target }}
+      # The same script a checker runs: docs/RELEASING.md.
+      - run: scripts/release-build.sh --target ${{ matrix.target }}
       - name: Package
         run: |
           name="cairn-${TAG}-${{ matrix.target }}"

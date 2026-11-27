@@ -46,7 +46,7 @@ Multi-process cluster:
              [--policy format|checkpoint|org|hook]   (default format; flags as for a party)
   cairn node --role party ... [--policy checkpoint|org]
              checkpoint (default): [--chains <caip2,...>] [--state <file>] [--audit-log <file>]
-             org: --org-rule <rule.json> --approvals <dir> [--audit-log <file>]
+             org: --org-rule <rule.json> --approvals <dir> [--audit-log <file>] [--use-record <file>]
       What this party agrees to sign. checkpoint: pqc-sidecar checkpoints, never two for one
       height. org: any payload that enough of the approvers in rule.json have approved
       (rule.json holds a required count and each approver's name and public key hex; see
@@ -100,6 +100,7 @@ Multi-process cluster:
                   [--round-timeout-ms <n>] [--mpc-timeout-ms <n>] [--link-delay-ms <n>]
                   [--access-key-id <id> --secret-access-key-file <file>]
                   [--tls-cert <kms.pem> --tls-key <kms.key>] [--metrics-listen <addr:port>]
+                  [--kms-cache-s <n>]   (repeat a finished signature for n s; default 120, 0 never)
       Requests must be signed (AWS SigV4) with those credentials; the secret may also come
       from CAIRN_KMS_SECRET_ACCESS_KEY. Without credentials the endpoint binds loopback only.
       KMS-compatible endpoint for pqc-sidecar's aws_kms backend. Without --peers the tower runs
@@ -177,11 +178,14 @@ fn node_policy(
             if audit_log.is_none() {
                 eprintln!("cairn node {id}: no --audit-log; approval decisions are not recorded");
             }
-            let config = cairn_policy::org::OrgConfig::load(
+            let mut config = cairn_policy::org::OrgConfig::load(
                 &PathBuf::from(rule),
                 PathBuf::from(approvals),
                 audit_log,
             )?;
+            if let Some(file) = arg(args, "--use-record") {
+                config.use_record = Some(PathBuf::from(file));
+            }
             eprintln!(
                 "cairn node {id}: organization policy, {} of {} approvers",
                 config.required,
@@ -510,6 +514,10 @@ fn run(args: &[String]) -> Result<(), String> {
                 auth,
                 tls: server_tls,
                 metrics: Some(metrics),
+                cache_secs: match arg(args, "--kms-cache-s") {
+                    Some(n) => Some(n.parse().map_err(|_| "--kms-cache-s is a number")?),
+                    None => None,
+                },
             };
             // The engine is a configuration choice: `flat` is the three-round committee
             // protocol (randomized signatures), `tower` the two-tier one (deterministic).

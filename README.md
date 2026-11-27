@@ -59,7 +59,7 @@ Each line is a test or a recorded run in this repository.
 | **Faults do not stall it.** Offline, stalled and misbehaving nodes are skipped or named and replaced. | Network tests with wall-clock deadlines. |
 | **Measured cost.** About 21 s per checkpoint across two hosts with real MPC; 0.12 s on one machine with a stand-in backend. | [Benchmarks](#benchmarks). |
 
-118 automated tests; `clippy` clean.
+119 automated tests; `clippy` clean.
 
 ## What it is not, yet
 
@@ -189,6 +189,7 @@ the live sidecar flow and two-host deployment.
 | Attaching any chain or organization: policy hooks, roster commands, `cairn sign` | [docs/HOOKS.md](docs/HOOKS.md) |
 | Everything that still blocks production use, with status | [docs/BLOCKERS.md](docs/BLOCKERS.md) |
 | Backup, certificate rotation, standby coordinator, monitoring, upgrades | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
+| Making a release, and rebuilding one to check it | [docs/RELEASING.md](docs/RELEASING.md) |
 | Why cairn's additions to the protocol should be safe, and where that argument stops | [docs/SECURITY_ARGUMENT.md](docs/SECURITY_ARGUMENT.md) |
 | How exact and how constant-time the mask sampler is | [docs/SAMPLER.md](docs/SAMPLER.md) |
 | What is planned and what funding would buy | [ROADMAP.md](ROADMAP.md) |

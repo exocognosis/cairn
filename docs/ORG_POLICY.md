@@ -63,10 +63,20 @@ approvers, lists one key under two names, or uses a name with characters other t
 - **A use window, not a signing count.** With `"use_window_secs": <n>` in the rule file, a
   party authorizes a payload for `n` seconds from the first time it does so and refuses it
   afterwards, even if the approvals have not expired. It is a window rather than a single
-  use because one request can take several sessions. The first use is a file
-  `<payload digest>.used` beside the approvals; whoever can delete it can reopen the window.
-  Without the setting, an approved payload can be signed until its approvals expire. A
-  signature already made stays valid, and the KMS endpoint may repeat it from its cache.
+  use because one request can take several sessions. Without the setting, an approved
+  payload can be signed until its approvals expire.
+- **Where first uses are kept.** In one file, `<rule file>.used` unless `--use-record <file>`
+  names another, one line per payload, readable by its owner only. It is not in the approvals
+  directory, so whoever delivers approvals cannot touch it. A running party also remembers
+  every entry and refuses to authorize under a window if the file has lost one, so deleting
+  or editing the file does not reopen a window; it stops signing until the file is put back.
+  What remains: someone who can write the file and restart the party can remove an entry
+  unnoticed, and that person can already read the party's share. The file grows by one line
+  per payload and is never trimmed.
+- **Signatures already made.** A signature stays valid for ever; a window cannot recall it.
+  The KMS endpoint answers a repeated request from its cache without asking the parties, but
+  only for 120 s after the signature was made (`--kms-cache-s <n>`, 0 to turn the cache
+  off). Keep that at or below the use window.
 - **The payload is opaque.** There are no amount limits, roles, or rules about content. What
   an approver approves is a digest; they must look at the payload themselves.
 - **Approver keys are files.** There is no hardware token or login. To remove an approver,

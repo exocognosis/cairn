@@ -352,3 +352,49 @@ fn benchmark_harness_runs() {
     assert!(bench::markdown(std::slice::from_ref(&r)).contains("one-malicious"));
     assert_eq!(bench::to_json(&r)["signers"], 16);
 }
+
+/// A repeated request is answered from the cache only while the cache keeps it: with the
+/// cache off, or once the entry is too old, the signers are asked again.
+#[test]
+fn kms_repeats_a_signature_only_within_the_cache_time() {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    let request = serde_json::json!({
+        "KeyId": "alias/cairn",
+        "Message": B64.encode(b"pqc-sidecar/checkpoint/v2 repeat"),
+        "MessageType": "RAW",
+        "SigningAlgorithm": "ML_DSA_SHAKE_256",
+    });
+    // (cache seconds, pause between the two requests) -> signatures made, answers from cache.
+    for (cache_secs, pause_ms, made, cached) in
+        [(None, 0, 1, 1), (Some(0), 0, 2, 0), (Some(1), 1200, 2, 0)]
+    {
+        let metrics = kms::Metrics::new();
+        let endpoint = kms::serve_opts(
+            "127.0.0.1:0",
+            certifier(),
+            kms::KmsOptions {
+                metrics: Some(metrics.clone()),
+                cache_secs,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for pause in [pause_ms, 0] {
+            let (status, _) = kms_call(&endpoint.url(), "TrentService.Sign", request.clone());
+            assert_eq!(status, 200);
+            std::thread::sleep(std::time::Duration::from_millis(pause));
+        }
+        let text = metrics.render();
+        let count = |name: &str| {
+            text.lines()
+                .find_map(|l| l.strip_prefix(name)?.trim().parse::<u64>().ok())
+                .unwrap_or_else(|| panic!("no {name} in {text}"))
+        };
+        assert_eq!(count("cairn_kms_signatures_total "), made, "{cache_secs:?}");
+        assert_eq!(
+            count("cairn_kms_cache_hits_total "),
+            cached,
+            "{cache_secs:?}"
+        );
+    }
+}

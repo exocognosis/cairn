@@ -171,6 +171,9 @@ pub struct OrgConfig {
     /// When set, approvals of a payload can be used for this many seconds from the first
     /// time this party authorizes it, and not after, whatever their own expiry says.
     pub use_window_secs: Option<u64>,
+    /// The file first uses are recorded in. Keep it out of the approvals directory, which
+    /// whoever delivers approvals can write to. `None` keeps the record in memory only.
+    pub use_record: Option<PathBuf>,
 }
 
 impl OrgConfig {
@@ -215,6 +218,7 @@ impl OrgConfig {
             audit_log,
             rule_file: Some(rule_file.to_owned()),
             use_window_secs,
+            use_record: Some(PathBuf::from(format!("{}.used", rule_file.display()))),
         })
     }
 }
@@ -268,6 +272,34 @@ pub struct OrgGovernancePolicy {
     rule_file: Option<PathBuf>,
     approvals_dir: PathBuf,
     audit_log: Option<PathBuf>,
+    use_record: Option<PathBuf>,
+    /// First uses this party knows of, by payload digest.
+    used: std::sync::Mutex<BTreeMap<[u8; 32], u64>>,
+}
+
+/// The first uses in a record file: one `<payload digest hex> <unix time>` per line. A file
+/// that does not exist is an empty record; a line that cannot be read is an error.
+fn read_use_record(path: &Path) -> std::io::Result<BTreeMap<[u8; 32], u64>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(e),
+    };
+    let mut used = BTreeMap::new();
+    for line in text.lines() {
+        let entry = line.split_once(' ').and_then(|(digest, at)| {
+            Some((
+                <[u8; 32]>::try_from(unhex(digest)?).ok()?,
+                at.parse::<u64>().ok()?,
+            ))
+        });
+        let (digest, at) =
+            entry.ok_or_else(|| std::io::Error::other("unreadable line in the use record"))?;
+        // Two parties sharing one file may both record a payload: the earlier time stands.
+        let first = used.entry(digest).or_insert(at);
+        *first = at.min(*first);
+    }
+    Ok(used)
 }
 
 impl OrgGovernancePolicy {
@@ -277,7 +309,13 @@ impl OrgGovernancePolicy {
             Some(file) => std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?,
             None => Vec::new(),
         };
+        let used = match &config.use_record {
+            Some(file) => read_use_record(file).map_err(|e| format!("{}: {e}", file.display()))?,
+            None => BTreeMap::new(),
+        };
         Ok(Self {
+            use_record: config.use_record,
+            used: std::sync::Mutex::new(used),
             committee_key_id: key_id(committee_pk),
             rule: std::sync::Mutex::new((rule, bytes)),
             rule_file: config.rule_file,
@@ -300,21 +338,36 @@ impl OrgGovernancePolicy {
     }
 
     /// With a use window: when this party first authorized `digest`, recorded now if never.
-    /// The record is a file beside the approvals, so it survives a restart.
+    /// The record is a file, so it survives a restart. While the party runs it also remembers
+    /// every entry, and refuses if the file has lost one: deleting or editing the file does
+    /// not reopen a window.
     fn first_use(&self, digest: &[u8; 32], at: u64) -> std::io::Result<u64> {
-        let path = self.approvals_dir.join(format!("{}.used", hex(digest)));
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            return text
-                .trim()
-                .parse()
-                .map_err(|_| std::io::Error::other("unreadable use record"));
+        let mut used = self.used.lock().expect("use record");
+        if let Some(path) = &self.use_record {
+            let on_disk = read_use_record(path)?;
+            let kept = |(digest, first): (&[u8; 32], &u64)| {
+                on_disk.get(digest).is_some_and(|there| there <= first)
+            };
+            if !used.iter().all(kept) {
+                return Err(std::io::Error::other(
+                    "the use record lost an entry: it was removed or changed",
+                ));
+            }
+            *used = on_disk;
         }
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        writeln!(f, "{at}")?;
-        f.sync_data()?;
+        if let Some(first) = used.get(digest) {
+            return Ok(*first);
+        }
+        if let Some(path) = &self.use_record {
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).append(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            let mut f = options.open(path)?;
+            writeln!(f, "{} {at}", hex(digest))?;
+            f.sync_data()?;
+        }
+        used.insert(*digest, at);
         Ok(at)
     }
 
@@ -556,6 +609,7 @@ mod tests {
             audit_log: None,
             rule_file: None,
             use_window_secs: None,
+            use_record: None,
         };
         let new = |c| OrgGovernancePolicy::new(b"committee", c).is_ok();
         assert!(new(config(1, &[("alice", key.clone())])));
@@ -642,30 +696,71 @@ mod tests {
                     .unwrap();
             }
         };
-        let used = |payload: &[u8]| {
+        let record = dir.join("rule.json.used");
+        let line = |payload: &[u8], at: u64| {
             let digest: [u8; 32] = Sha3_256::digest(payload).into();
-            dir.join(format!("{}.used", hex(&digest)))
+            format!("{} {at}\n", hex(&digest))
+        };
+        let recorded = |payload: &[u8]| {
+            std::fs::read_to_string(&record)
+                .is_ok_and(|text| text.contains(&line(payload, 0)[..64]))
         };
 
         // Within the window a payload can be authorized again: a session may be retried.
         let fresh = b"release 1.0";
         approve(fresh);
-        assert!(!used(fresh).exists());
+        assert!(!recorded(fresh));
         assert!(policy.authorize_sign(&CTX, fresh).is_ok());
         assert!(policy.authorize_sign(&CTX, fresh).is_ok());
-        assert!(used(fresh).exists());
+        assert!(recorded(fresh));
+        // The record is not in the approvals directory under the payload's name.
+        assert!(!dir.join(line(fresh, 0)[..64].to_owned() + ".used").exists());
 
         // First used long ago: the approvals have a day left, and are spent all the same.
         let old = b"release 0.9";
         approve(old);
-        std::fs::write(used(old), format!("{}\n", now() - 3600)).unwrap();
-        let Err(PolicyError::Refused(reason)) = policy.authorize_sign(&CTX, old) else {
-            panic!("spent approvals authorized a payload");
+        let mut text = std::fs::read_to_string(&record).unwrap();
+        text.push_str(&line(old, now() - 3600));
+        std::fs::write(&record, &text).unwrap();
+        let spent = |policy: &OrgGovernancePolicy| {
+            let Err(PolicyError::Refused(reason)) = policy.authorize_sign(&CTX, old) else {
+                panic!("spent approvals authorized a payload");
+            };
+            assert!(reason.contains("window has passed"), "{reason}");
         };
-        assert!(reason.contains("window has passed"), "{reason}");
+        spent(&policy);
         // A payload nobody approved leaves no record.
         assert!(policy.authorize_sign(&CTX, b"release 6.6").is_err());
-        assert!(!used(b"release 6.6").exists());
+        assert!(!recorded(b"release 6.6"));
+
+        // Deleting the record does not reopen the window: the running party notices.
+        std::fs::remove_file(&record).unwrap();
+        for payload in [&old[..], &fresh[..]] {
+            let Err(PolicyError::Refused(reason)) = policy.authorize_sign(&CTX, payload) else {
+                panic!("a deleted use record authorized a payload");
+            };
+            assert!(reason.contains("lost an entry"), "{reason}");
+        }
+        // Neither does dropping one line, or moving a first use later.
+        std::fs::write(&record, line(fresh, now())).unwrap();
+        assert!(policy.authorize_sign(&CTX, old).is_err());
+        std::fs::write(
+            &record,
+            text.replace(&line(old, now() - 3600), &line(old, now())),
+        )
+        .unwrap();
+        assert!(policy.authorize_sign(&CTX, old).is_err());
+        // Put back, it works again, and a restarted party reads the same record.
+        std::fs::write(&record, &text).unwrap();
+        assert!(policy.authorize_sign(&CTX, fresh).is_ok());
+        let config = OrgConfig::load(&dir.join("rule.json"), dir.clone(), None).unwrap();
+        let restarted = OrgGovernancePolicy::new(b"committee", config).unwrap();
+        spent(&restarted);
+        assert!(restarted.authorize_sign(&CTX, fresh).is_ok());
+        // A record that cannot be read stops the party from starting.
+        std::fs::write(&record, "not a record\n").unwrap();
+        let config = OrgConfig::load(&dir.join("rule.json"), dir.clone(), None).unwrap();
+        assert!(OrgGovernancePolicy::new(b"committee", config).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

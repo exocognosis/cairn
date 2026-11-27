@@ -68,6 +68,10 @@ one machine, for local trials.) This sequence was run as written, one directory 
   file only after the other parties have signed a higher height than this one ever did, or
   accept that this party's "never twice at a height" rule restarts from zero while the
   others' still holds.
+- **The use record (`<rule file>.used`)**, when the organization rule has a use window, lists
+  the payloads this party has authorized and when. Do not delete or restore it: a running
+  party stops authorizing if an entry goes missing, and an old copy on a restarted party
+  reopens the windows the copy does not list. See docs/ORG_POLICY.md.
 - A lost share with no backup: `cairn share-recover` on the new machine, `cairn share-help` on
   enough others (tested end to end on 3-of-4; see `recover` unit tests).
 
@@ -164,6 +168,11 @@ Both may be up at once. The parties, not the coordinators, enforce one checkpoin
 - There is no compatibility promise for share, committee or policy-state files between
   versions yet, and no migration tool. Keep the cold backup and the old binary until the
   upgraded committee has signed.
+- **0.7.0 to 0.7.1 with a use window:** first uses moved from `<digest>.used` files in the
+  approvals directory to one file beside the rule file. The old files are ignored, so a
+  payload whose window had closed can be authorized once more until its approvals expire.
+  Upgrade when no approved payload is in that state, or remove its approvals first.
+- A release binary can be rebuilt from its tag and compared: docs/RELEASING.md.
 - `scripts/upgrade-rehearsal.sh` rehearses both on one machine and one key: v0.3.0 to v0.4.0
   rolling (wire version 2 in both), then to the current build with a stop (wire version 3),
   on the files v0.3.0 wrote, with a verified certificate after every step.
