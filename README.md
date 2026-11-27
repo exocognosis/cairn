@@ -143,11 +143,13 @@ for another key, an unlisted chain, a lower height, or a second checkpoint at on
 on disk across restarts); the KMS endpoint verifies AWS SigV4 request signatures and refuses to
 listen beyond loopback without credentials; parties and the coordinator write audit logs.
 
-**It is a prototype, not a secure implementation**: written from the paper without comparison
-against the authors' code, floating-point sampling, not constant time, and measured across
-hosts only once, on one link. Cost also rises steeply with the threshold, so small thresholds are the
-practical range. [docs/PRODUCTION_PATH.md](docs/PRODUCTION_PATH.md) has the comparison and what
-is missing; ARCHITECTURE.md section 10.7 has the protocol. Everything below describes the
+**It has had no outside review.** It has been compared line by line with the authors' public
+code and signs together with it; masks are sampled in double-double arithmetic; one timing
+leak was measured and closed on arm64, and x86-64 has not been measured. It was measured
+across hosts only on one link. Cost also rises steeply with the threshold, so small thresholds are the
+practical range. [docs/BLOCKERS.md](docs/BLOCKERS.md) lists what is missing,
+[docs/REVIEW_REQUEST.md](docs/REVIEW_REQUEST.md) says what a reviewer should look at first,
+and ARCHITECTURE.md section 10.7 has the protocol. Everything below describes the
 original tower design, which remains the "exact FIPS 204 signer" mode.
 
 ## Try it in five minutes

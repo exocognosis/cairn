@@ -88,9 +88,19 @@ gives the party's share. So the sampler must not take input-dependent paths.
   taking data-dependent time. With the processor's data-independent-timing bit set (arm64
   DIT) the difference went away: t of 0.3 to 1.6 over four runs. Every thread that samples a
   mask or computes a response now sets that bit first (`threshold_mldsa::ct`), at a cost of
-  about 5% of the round. Limits: one processor; one step (the response round, 2-of-3); a
+  about 5% of the round. Limits: one processor; one committee size (2-of-3); a
   statistical test finds differences, it does not prove there are none; and on x86-64 the
   equivalent setting (DOITM) belongs to the operating system, so cairn cannot turn it on there.
+- **The mask round, measured (2026-11-27).** The same script times round 1, which samples
+  the masks, for the same randomness every time against fresh randomness each time: t of
+  0.7, -0.6, -0.1 and -1.8 over four runs of 4,000 samples, and -0.2 and -1.2 in control
+  runs. No difference found. The machine was also running a long signing test at the time,
+  which adds noise and could hide a small difference.
+- **Share files, not measured.** Reading and writing a share file take 8 and 4 microseconds.
+  An attempt to time them for the two share classes showed differences of under 0.1
+  microseconds with t above 4.5, but so did the control runs with identical data, so the
+  method cannot tell data from memory layout at that scale and the test was not kept. A
+  share file is read once when a party starts, on its own machine.
 - **Erasure.** Shares, masks, the uniforms behind them, rejected responses and share file
   buffers are overwritten when dropped. A rejected response is computed and then erased,
   so the work done does not depend on whether a repetition is accepted.

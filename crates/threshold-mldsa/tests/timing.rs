@@ -1,5 +1,5 @@
-//! A timing measurement of the response round (round 3), the one step that mixes a party's
-//! share into a value under a mask. Run by `scripts/timing-check.sh`; ignored otherwise,
+//! Timing measurements of the response round (round 3), the one step that mixes a party's
+//! share into a value under a mask, and of the mask round (round 1), whose secret is the mask. Run by `scripts/timing-check.sh`; ignored otherwise,
 //! because it needs a quiet machine and a release build.
 //!
 //! Method (as in dudect): time the same call for two classes of secret, interleaved at
@@ -41,13 +41,68 @@ fn welch(a: &[f64], b: &[f64]) -> f64 {
     (ma - mb) / (va / na + vb / nb).sqrt()
 }
 
+fn samples() -> usize {
+    std::env::var("CAIRN_TIMING_SAMPLES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4000)
+}
+
+/// Drop the slowest tenth of all samples, print both means, return Welch's t.
+fn verdict(what: &str, names: [&str; 2], times: &[Vec<f64>; 2]) -> f64 {
+    let mut pooled: Vec<f64> = times.iter().flatten().copied().collect();
+    pooled.sort_by(f64::total_cmp);
+    let cut = pooled[pooled.len() * 9 / 10];
+    let kept: Vec<Vec<f64>> = times
+        .iter()
+        .map(|t| t.iter().copied().filter(|x| *x <= cut).collect())
+        .collect();
+    let t = welch(&kept[0], &kept[1]);
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64 / 1e3;
+    println!(
+        "{what}: {} {:.1} us (n={}), {} {:.1} us (n={}), t = {t:.2}",
+        names[0],
+        mean(&kept[0]),
+        kept[0].len(),
+        names[1],
+        mean(&kept[1]),
+        kept[1].len()
+    );
+    t
+}
+
+/// Round 1 does not touch the share; its secret is the mask, which the randomness it draws
+/// determines. Classes, as in dudect: the same randomness every time, and fresh randomness.
+#[test]
+#[ignore = "timing measurement; run scripts/timing-check.sh"]
+fn mask_round_time_does_not_depend_on_the_mask() {
+    use rand::SeedableRng;
+    let control = std::env::var_os("CAIRN_TIMING_CONTROL").is_some();
+    let (key, parties) = keygen(2, 3, &mut OsRng).expect("2-of-3");
+    let fixed: [u8; 32] = OsRng.gen();
+    let mut times: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+    for _ in 0..samples() {
+        let class = OsRng.gen_range(0..2usize);
+        let seed = if class == 0 || control {
+            fixed
+        } else {
+            OsRng.gen()
+        };
+        let mut rng = rand::rngs::StdRng::from_seed(seed);
+        let start = Instant::now();
+        let out = parties[0].round1(&key, &mut rng);
+        let elapsed = start.elapsed().as_nanos() as f64;
+        std::hint::black_box(out);
+        times[class].push(elapsed);
+    }
+    let t = verdict("mask round", ["fixed mask", "fresh mask"], &times);
+    assert!(t.abs() < 4.5, "timing differs between masks: t = {t:.2}");
+}
+
 #[test]
 #[ignore = "timing measurement; run scripts/timing-check.sh"]
 fn response_round_time_does_not_depend_on_the_share() {
-    let samples: usize = std::env::var("CAIRN_TIMING_SAMPLES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4000);
+    let samples = samples();
     println!(
         "data-independent timing: {}",
         if threshold_mldsa::ct::harden_thread() {
@@ -84,22 +139,7 @@ fn response_round_time_does_not_depend_on_the_share() {
         runs[class] += 1.0;
         times[class].push(elapsed);
     }
-    let mut pooled: Vec<f64> = times.iter().flatten().copied().collect();
-    pooled.sort_by(f64::total_cmp);
-    let cut = pooled[pooled.len() * 9 / 10];
-    let kept: Vec<Vec<f64>> = times
-        .iter()
-        .map(|t| t.iter().copied().filter(|x| *x <= cut).collect())
-        .collect();
-    let t = welch(&kept[0], &kept[1]);
-    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64 / 1e3;
-    println!(
-        "response round: zero share {:.1} us (n={}), bound share {:.1} us (n={}), t = {t:.2}",
-        mean(&kept[0]),
-        kept[0].len(),
-        mean(&kept[1]),
-        kept[1].len()
-    );
+    let t = verdict("response round", ["zero share", "bound share"], &times);
     println!(
         "accepted fraction: zero share {:.4}, bound share {:.4}",
         accepted[0] / runs[0],

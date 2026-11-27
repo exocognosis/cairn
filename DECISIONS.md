@@ -726,3 +726,14 @@ same one. `scripts/release-build.sh`, which the release workflow now runs, maps 
 out of the binary. Measured on macOS: the same build directory gives the same bytes; a
 different one changes 48 bytes, which looks like the linker's identifier and was not traced.
 Linux was not measured. docs/RELEASING.md says exactly this.
+
+**D-138. The mask round is timed too; share files are not.** `scripts/timing-check.sh` now
+also times round 1 for fixed against fresh randomness and found no difference on the M3. A
+third measurement, of reading and writing share files, failed its own control run (the same
+data in both classes still gave t above 4.5), so it was removed instead of kept as a test
+that proves nothing. docs/SAMPLER.md records both.
+
+**D-139. A review request in the repository.** docs/REVIEW_REQUEST.md asks five scoped
+questions of the committee engine, in order of what an error would cost, and lists what was
+already checked. It is addressed to any reader, not to the paper's authors, and nothing has
+been sent to anyone.
