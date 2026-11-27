@@ -158,3 +158,73 @@ fn the_kms_endpoint_keeps_serving_after_garbage_requests() {
         "{reply}"
     );
 }
+
+/// Valid inputs for the coverage-guided fuzzer to start from (`scripts/fuzz.sh`).
+#[test]
+#[ignore = "writes fuzz seeds; run by scripts/fuzz.sh"]
+fn write_fuzz_seeds() {
+    let Some(dir) = std::env::var_os("CAIRN_FUZZ_SEEDS").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let write = |target: &str, name: &str, bytes: &[u8]| {
+        let dir = dir.join(target);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), bytes).unwrap();
+    };
+    let mut rng = StdRng::seed_from_u64(0xCA12_0005);
+    let (key, parties) = mithril::keygen(2, 3, &mut rng).unwrap();
+    let (state, _) = parties[0].round1(&key, &mut rng);
+    write("keys", "group", &key.to_bytes());
+    write("keys", "share", &parties[0].to_bytes());
+    write("keys", "w", &mithril::w_to_wire(&state.reveal()[0]));
+    for (name, body) in [
+        (
+            "prepare",
+            Body::Prepare {
+                message: b"cairn".to_vec(),
+            },
+        ),
+        ("abort", Body::Abort),
+        (
+            "refused",
+            Body::PolicyRefused {
+                reason: "no".into(),
+            },
+        ),
+    ] {
+        let payload = bincode::serialize(&Frame {
+            version: NET_VERSION,
+            from: NodeId::Coordinator,
+            to: NodeId::Root(1),
+            session: [7; 32],
+            body,
+        })
+        .unwrap();
+        let mut stream = (payload.len() as u32).to_be_bytes().to_vec();
+        stream.extend(&payload);
+        write("frame", name, &stream);
+    }
+    let checkpoint = cairn_net::policy::Checkpoint {
+        chain: "cosmos:cairn-devnet-1".into(),
+        epoch: 3,
+        height: 100,
+        block_hash: vec![1; 32],
+        finality_commitment: vec![2; 32],
+        key_id: [3; 32],
+    }
+    .message();
+    write("text", "checkpoint", &checkpoint);
+    let approver = cairn_policy::org::ApproverKey::from_seed("alice", &[9; 32]).unwrap();
+    let approval = approver.approve(&[1; 1952], b"payload", u64::MAX).to_json();
+    write("text", "approval", approval.as_bytes());
+    write(
+        "text",
+        "roster",
+        br#"{"threshold":2,"identities":["00","11","22"]}"#,
+    );
+    write(
+        "text",
+        "peers",
+        br#"{"party_1":"127.0.0.1:7300","root_1":"127.0.0.1:7301"}"#,
+    );
+}

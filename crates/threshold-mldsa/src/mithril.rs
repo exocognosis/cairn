@@ -688,6 +688,18 @@ impl PartyKey {
     }
 }
 
+/// The public challenge of repetition `rep`, the polynomial `round3` multiplies the share
+/// by. Anyone who saw the openings can compute it; tests use it to check responses.
+pub fn challenge_poly(
+    key: &GroupKey,
+    message: &[u8],
+    revealed: &BTreeMap<u8, Vec<PolyVec>>,
+    rep: usize,
+) -> crate::fips204::Poly {
+    let mu = message_representative(&key.tr, &[], message);
+    sample_in_ball(&challenge(&mu, revealed, rep))
+}
+
 impl Round1 {
     /// Round 2: reveal the commitments' openings.
     pub fn reveal(&self) -> Vec<PolyVec> {

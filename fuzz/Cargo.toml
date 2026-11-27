@@ -1,0 +1,44 @@
+# Coverage-guided fuzz targets. Not part of the workspace: they need a nightly compiler and
+# cargo-fuzz. Run with scripts/fuzz.sh.
+[package]
+name = "cairn-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tokio = { version = "1", features = ["rt"] }
+threshold-mldsa = { path = "../crates/threshold-mldsa" }
+cairn-net = { path = "../crates/cairn-net" }
+cairn-policy = { path = "../crates/cairn-policy" }
+cairn-sidecar = { path = "../crates/cairn-sidecar" }
+
+[patch.crates-io]
+tiny_http = { path = "../vendor/tiny_http" }
+
+[[bin]]
+name = "keys"
+path = "fuzz_targets/keys.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frame"
+path = "fuzz_targets/frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text"
+path = "fuzz_targets/text.rs"
+test = false
+doc = false
+bench = false

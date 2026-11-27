@@ -58,8 +58,14 @@ adequate, and what is the most likely leak it would miss?
   checks. One difference was found and aligned. The two implementations also sign together
   in mixed committees (`scripts/reference-interop.sh`). Details: docs/BLOCKERS.md, item 1.
 - Signatures verify with RustCrypto's ML-DSA and with the unmodified pqc-sidecar verifiers.
-- Every parser of bytes from the network or another party's file is fed seeded damaged
-  input in the test suite. This is not coverage-guided fuzzing.
+- The same at scale: 600 keys dealt by the reference, 1,206 attempts, identical bytes from
+  both combine procedures, and the same answer rate from both implementations' parties.
+- A statistical test of published responses (`scripts/leak-check.sh`): over 105,000
+  responses with a share at the bound, `<z, c s>` averages zero within half a standard
+  error. It would see a missing rejection step (11 standard errors) and a partial one only
+  above about 42% of that. One committee size, first moment only.
+- Coverage-guided fuzzing of every parser of bytes from the network or another party's file
+  (`scripts/fuzz.sh`): 32 million inputs, no crash. Ten minutes per target is short.
 - Secrets are erased on drop in the protocol code.
 
 ## Known limits, not findings

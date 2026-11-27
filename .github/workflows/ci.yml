@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Advisories appear without a push: check the locked dependencies every Monday too.
+  schedule:
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
@@ -24,3 +27,18 @@ jobs:
       # External verifiers (pqc-sidecar, the npm package) are not installed here; the tests
       # that need them print SKIPPED. Everything else runs, including the multi-process cluster.
       - run: cargo test --workspace
+
+  advisories:
+    name: known vulnerabilities in dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: true
+      - run: cargo install cargo-audit --locked
+      # Fails on a known vulnerability in Cargo.lock; "unmaintained" notices are printed only.
+      - run: cargo audit

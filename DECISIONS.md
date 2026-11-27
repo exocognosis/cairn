@@ -737,3 +737,25 @@ that proves nothing. docs/SAMPLER.md records both.
 questions of the committee engine, in order of what an error would cost, and lists what was
 already checked. It is addressed to any reader, not to the paper's authors, and nothing has
 been sent to anyone.
+
+**D-140. Without money for a review, measure what a review would ask.** Four additions, all
+run on 2026-11-27 on the M3:
+
+- *Do published responses lean towards the share?* `scripts/leak-check.sh` signs with a share
+  at the bound and averages `<z, c s>` over the responses that pass rejection. Over 105,071
+  responses the mean was -0.5 standard errors from zero (control with a zero share: 0.2). A
+  response with no rejection would have stood 11 standard errors out, so the run could see a
+  lean of about 42% of that or more, and nothing smaller. It checks one committee size
+  (2-of-3) and the first moment only.
+- *Does cairn reject like the authors' code?* `CAIRN_INTEROP_ROUNDS=100
+  scripts/reference-interop.sh`: 600 keys dealt by the reference, 1,206 signing attempts in
+  six mixed committees, every transcript combined to the same bytes by both, and the two
+  implementations' parties answering at the same rate (largest two-proportion z: -1.95).
+- *Coverage-guided fuzzing.* `scripts/fuzz.sh` (`fuzz/`, nightly compiler and cargo-fuzz):
+  key and share files and wire encodings, network frames, and the text parsers. Ten minutes
+  each, 32 million inputs, no crash. D-133's seeded tests stay in the ordinary suite.
+- *Dependencies.* CI runs `cargo audit` on every push and weekly: no known vulnerability,
+  two unmaintained notices (docs/RELEASING.md). The release workflow adds a signed build
+  provenance statement to each archive; it first runs at the next tag.
+
+None of this is a review. Each is a measurement with a stated reach.

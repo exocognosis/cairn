@@ -146,7 +146,9 @@ listen beyond loopback without credentials; parties and the coordinator write au
 **It has had no outside review.** It has been compared line by line with the authors' public
 code and signs together with it; masks are sampled in double-double arithmetic; one timing
 leak was measured and closed on arm64, and x86-64 has not been measured. It was measured
-across hosts only on one link. Cost also rises steeply with the threshold, so small thresholds are the
+across hosts only on one link. In place of a review there are measurements, each with a
+stated reach: a statistical test for share leakage in published responses, 600-key runs
+against the authors' code, and coverage-guided fuzzing (DECISIONS.md D-140). Cost also rises steeply with the threshold, so small thresholds are the
 practical range. [docs/BLOCKERS.md](docs/BLOCKERS.md) lists what is missing,
 [docs/REVIEW_REQUEST.md](docs/REVIEW_REQUEST.md) says what a reviewer should look at first,
 and ARCHITECTURE.md section 10.7 has the protocol. Everything below describes the

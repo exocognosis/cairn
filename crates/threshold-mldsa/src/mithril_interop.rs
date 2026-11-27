@@ -248,15 +248,36 @@ fn reference_interop() {
         (3, 5, &[0, 2, 4], &[2]),
         (4, 5, &[0, 1, 3, 4], &[0, 3]),
     ];
+    // CAIRN_INTEROP_ROUNDS repeats every committee with a new key and new randomness, and
+    // adds up how often each implementation's parties answer: the same rejection test on
+    // the same kind of share must answer at the same rate.
+    let rounds: usize = std::env::var("CAIRN_INTEROP_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
     for (t, n, active, ours) in configs {
-        let (attempts, theirs, mine, offered) = mixed_committee(*t, *n, active, ours);
+        let (mut attempts, mut theirs, mut mine, mut offered) = (0, 0, 0, 0);
+        for _ in 0..rounds {
+            let (a, b, c, d) = mixed_committee(*t, *n, active, ours);
+            attempts += a;
+            theirs += b;
+            mine += c;
+            offered += d;
+        }
         let n_ours = ours.len();
         let n_theirs = active.len() - n_ours;
-        println!(
-            "{t}-of-{n} active {active:?} cairn {ours:?}: signed after {attempts} attempt(s); \
-             answer rate reference {:.3}, cairn {:.3}",
+        let (p_theirs, p_mine) = (
             theirs as f64 / (offered * n_theirs) as f64,
             mine as f64 / (offered * n_ours) as f64,
+        );
+        // Two-proportion z statistic for the difference in answer rates.
+        let (n1, n2) = ((offered * n_theirs) as f64, (offered * n_ours) as f64);
+        let pooled = (theirs + mine) as f64 / (n1 + n2);
+        let z = (p_theirs - p_mine) / (pooled * (1.0 - pooled) * (1.0 / n1 + 1.0 / n2)).sqrt();
+        println!(
+            "{t}-of-{n} active {active:?} cairn {ours:?}: {rounds} key(s), {attempts} attempt(s), \
+             every one checked; answer rate reference {p_theirs:.3} (n={n1}), cairn {p_mine:.3} \
+             (n={n2}), z = {z:.2}",
         );
     }
 }

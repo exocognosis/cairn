@@ -17,6 +17,9 @@ env:
 
 permissions:
   contents: write
+  # For the signed statement of where each archive was built (docs/RELEASING.md).
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -46,6 +49,11 @@ jobs:
           cp "target/${{ matrix.target }}/release/cairn" README.md LICENSE "$name/"
           tar -czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      # A statement signed by GitHub's identity for this workflow run, not by a key anyone
+      # holds: this archive was built by this workflow from this commit.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "cairn-*.tar.gz"
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}

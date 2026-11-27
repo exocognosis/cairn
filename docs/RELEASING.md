@@ -6,9 +6,17 @@ A tag `vX.Y.Z` on `main`. Pushing it runs `.github/workflows/release.yml`, which
 `cairn` binary for Linux x86-64, Linux arm64 and macOS arm64 and attaches each archive with a
 SHA-256 checksum to the GitHub release.
 
-Releases are not signed. The checksums come from the same place as the archives, so they
-detect a damaged download, not a replaced one. To trust a binary without trusting the
-download, rebuild it as described below.
+From the release after 0.7.1, each archive also has a build provenance statement: GitHub
+signs, with the identity of the workflow run and no key that anyone holds, that this archive
+was built by this repository's release workflow from this commit. Check one with
+
+```sh
+gh attestation verify cairn-vX.Y.Z-<target>.tar.gz --repo exocognosis/cairn
+```
+
+That shows the archive came from the workflow and was not replaced afterwards. It does not
+show the source is sound, and it trusts GitHub. To avoid trusting the download at all,
+rebuild it as described below. This step has not run yet: it was added after the 0.7.1 tag.
 
 ## Before tagging
 
@@ -51,5 +59,8 @@ not.
 
 ## Dependencies
 
-`Cargo.lock` is committed and builds use `--locked`. There is no automated advisory check in
-CI yet (`cargo audit` or `cargo deny`); run one by hand before a release if you have it.
+`Cargo.lock` is committed and builds use `--locked`. CI runs `cargo audit` on every push and
+every Monday, and fails on a known vulnerability. On 2026-11-27 it reported none, and two
+"unmaintained" notices: `bincode` 1.3 (key files and network frames) and `rustls-pemfile` 2
+(reading certificates). Neither has a known vulnerability; replacing `bincode` changes file
+and wire formats and is not done.
