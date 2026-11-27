@@ -8,6 +8,7 @@
 //! the MPC boundary ([`engine`]). v1 ships only an in-process ideal functionality for that
 //! boundary: read the status section of the README before relying on anything here.
 
+pub mod ct;
 mod dd;
 pub mod engine;
 pub mod fips204;

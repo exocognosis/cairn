@@ -78,7 +78,22 @@ gives the party's share. So the sampler must not take input-dependent paths.
 - **Not established.** The check covers arm64 and those two functions. Division and square
   root instructions can take data-dependent time inside some processors. The polynomial
   arithmetic around the sampler is branch-free at source level (see item 3) but its machine
-  code has not been read. No timing measurements have been made.
+  code has not been read.
+- **Measured, and one leak found and closed (2026-11-27).** `scripts/timing-check.sh` times
+  the response round for an all-zero share and for a share with every coefficient at the
+  bound, interleaved at random, 4,000 samples, and compares the means (Welch's t; below 4.5
+  passes). On an Apple M3 the round was about 5 of 705 microseconds faster for the zero
+  share: t between 3 and 31 over four runs, and 0.4 to 0.6 in control runs that gave both
+  classes the same share. The source has no branch on the share, so the processor itself was
+  taking data-dependent time. With the processor's data-independent-timing bit set (arm64
+  DIT) the difference went away: t of 0.3 to 1.6 over four runs. Every thread that samples a
+  mask or computes a response now sets that bit first (`threshold_mldsa::ct`), at a cost of
+  about 5% of the round. Limits: one processor; one step (the response round, 2-of-3); a
+  statistical test finds differences, it does not prove there are none; and on x86-64 the
+  equivalent setting (DOITM) belongs to the operating system, so cairn cannot turn it on there.
+- **Erasure.** Shares, masks, the uniforms behind them, rejected responses and share file
+  buffers are overwritten when dropped. A rejected response is computed and then erased,
+  so the work done does not depend on whether a repetition is accepted.
 - **Key generation.** Secrets are expanded with the FIPS 204 rejection sampler (`ExpandS`),
   whose running time depends on how many candidates are rejected, as in every implementation
   of the standard. That is unchanged.

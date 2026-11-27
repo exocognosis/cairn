@@ -5,13 +5,28 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![FIPS 204 ML-DSA-65](https://img.shields.io/badge/FIPS%20204-ML--DSA--65-blue)
 
-**A quorum of validators signs a blockchain checkpoint with one ordinary post-quantum
-signature.**
+**A group signs with one ordinary post-quantum signature, and no member ever holds the key.**
 
-cairn is a threshold signing system for ML-DSA-65 (FIPS 204, formerly Dilithium). Sixteen
-validators, none of whom holds the key, jointly produce a single standard 3,309-byte signature
-over a finalized block. Any existing FIPS 204 verifier accepts it: no new verifier, no proof
-system, no change on the verifying side.
+cairn is a threshold signing system for ML-DSA-65 (FIPS 204, formerly Dilithium). A committee
+of validators or of an organization's operators jointly produces a single standard 3,309-byte
+signature, each member applying its own rules first. Any existing FIPS 204 verifier accepts
+it: no new verifier, no proof system, no change on the verifying side.
+
+## Two engines; use the committee
+
+| | Committee (flat) | Tower |
+|---|---|---|
+| Use it for | **anything you intend to rely on** | research into larger signer sets |
+| Members | 2 to 6, equal weight | 16 signers in 4 leaves, plus 4 root engines |
+| Key generation | joint (`cairn dkg`): no machine ever holds the key | one trusted dealer |
+| Secret computation | complete: nothing is stood in for | needs a three-party MPC; the tested one is semi-honest and the default is a clear-text stand-in |
+| Latency across two hosts, about 180 ms apart | 1 to 6 s (2-of-3 to 3-of-5) | 6 s with the stand-in, 23 s with real MPC |
+| Signature | valid ML-DSA-65, randomized | byte-identical to a deterministic FIPS 204 signer |
+
+The committee is the path this project hardens for use. The tower stays as the mode that
+reproduces the FIPS 204 signer exactly and as the place to study committees of committees.
+Neither has had outside review ([What it is not, yet](#what-it-is-not-yet)). Sections from
+"Why a tower" on describe the tower.
 
 ## Why it matters
 
@@ -44,11 +59,13 @@ Each line is a test or a recorded run in this repository.
 | **Faults do not stall it.** Offline, stalled and misbehaving nodes are skipped or named and replaced. | Network tests with wall-clock deadlines. |
 | **Measured cost.** About 21 s per checkpoint across two hosts with real MPC; 0.12 s on one machine with a stand-in backend. | [Benchmarks](#benchmarks). |
 
-74 automated tests; `clippy` clean.
+118 automated tests; `clippy` clean.
 
 ## What it is not, yet
 
-cairn is a **research preview, not custody software**. The three gaps that matter:
+cairn is a **research preview, not custody software**. For the committee engine the gaps are:
+no outside review, a floating-point mask sampler, code that is not constant time, and a limit
+of six equal members whose set cannot change without a new key. The tower adds three more:
 
 1. **The MPC is semi-honest.** It protects the key from parties that follow the protocol, not
    from ones that deviate.
@@ -60,10 +77,10 @@ cairn is a **research preview, not custody software**. The three gaps that matte
 Nothing here has had outside review. [Status and limits](#status-and-limits) has the full
 list and [ROADMAP.md](ROADMAP.md) says what closing each gap takes.
 
-## New direction: a second, much faster protocol (prototype)
+## The committee engine
 
-Recent work shows the secret mask does not have to be computed inside an MPC at all. cairn now
-also implements the three-round protocol of *Efficient Threshold ML-DSA* (USENIX Security
+Recent work shows the secret mask does not have to be computed inside an MPC at all. cairn
+implements the three-round protocol of *Efficient Threshold ML-DSA* (USENIX Security
 2026) for one committee of up to six parties: no MPC backend, no root engines, and signatures
 that the same unmodified verifiers accept. They are valid ML-DSA-65 signatures, but not the
 ones a deterministic FIPS 204 signer would produce.

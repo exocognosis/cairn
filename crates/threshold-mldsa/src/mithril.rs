@@ -26,6 +26,7 @@ use crate::fips204::{
 };
 use rand::{CryptoRng, Rng};
 use std::collections::BTreeMap;
+use zeroize::Zeroize;
 
 /// Expansion factor for the first `L` coordinates of the randomness (all ML-DSA-65 sets).
 pub const NU: f64 = 6.0;
@@ -97,6 +98,16 @@ pub struct GroupKey {
 pub struct PartyKey {
     pub index: u8,
     shares: BTreeMap<Subset, (PolyVec, PolyVec)>,
+}
+
+impl Drop for PartyKey {
+    /// The shares are erased when the key leaves memory.
+    fn drop(&mut self) {
+        for (s1, s2) in self.shares.values_mut() {
+            s1.zeroize();
+            s2.zeroize();
+        }
+    }
 }
 
 fn flat(v: &PolyVec) -> Vec<i32> {
@@ -213,21 +224,38 @@ type ShareWire = Vec<(Subset, Vec<i32>, Vec<i32>)>;
 impl PartyKey {
     /// Serialize for a share file. The bytes are this party's long-term secret.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let shares: ShareWire = self
+        let mut shares: ShareWire = self
             .shares
             .iter()
             .map(|(s, (a, b))| (s.clone(), flat(a), flat(b)))
             .collect();
-        bincode::serialize(&(self.index, shares)).expect("share encodes")
+        let bytes = bincode::serialize(&(self.index, &shares)).expect("share encodes");
+        for (_, a, b) in &mut shares {
+            a.zeroize();
+            b.zeroize();
+        }
+        bytes
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        let (index, wire): (u8, ShareWire) = bincode::deserialize(bytes).ok()?;
-        let mut shares = BTreeMap::new();
-        for (subset, a, b) in wire {
-            shares.insert(subset, (polys(&a, L)?, polys(&b, K)?));
+        let (index, mut wire): (u8, ShareWire) = bincode::deserialize(bytes).ok()?;
+        // Built inside the key so that a malformed file still erases what was read.
+        let mut key = Self {
+            index,
+            shares: BTreeMap::new(),
+        };
+        let mut whole = true;
+        for (subset, a, b) in &mut wire {
+            match (polys(a, L), polys(b, K)) {
+                (Some(s1), Some(s2)) => {
+                    key.shares.insert(subset.clone(), (s1, s2));
+                }
+                _ => whole = false,
+            }
+            a.zeroize();
+            b.zeroize();
         }
-        Some(Self { index, shares })
+        whole.then_some(key)
     }
 }
 
@@ -502,6 +530,18 @@ struct Mask {
     w: PolyVec,
 }
 
+impl Drop for Mask {
+    /// A mask and one response under it give away the share, so it does not outlive its use.
+    fn drop(&mut self) {
+        for d in &mut self.x {
+            d.0.zeroize();
+            d.1.zeroize();
+        }
+        self.r1.zeroize();
+        self.w.zeroize();
+    }
+}
+
 /// A party's state between rounds. Single use: a mask must never answer two challenges.
 pub struct Round1 {
     index: u8,
@@ -533,7 +573,10 @@ impl PartyKey {
         let uniforms: Vec<Vec<(Dd, Dd)>> = (0..key.params.reps)
             .map(|_| (0..PAIRS).map(|_| uniform_pair(rng)).collect())
             .collect();
+        crate::ct::harden_thread();
         let mask = |uniforms: &[(Dd, Dd)]| {
+            // Each repetition runs on its own thread, and the timing bit is per thread.
+            crate::ct::harden_thread();
             let x = ball_from_uniforms(key.params.r_prime, uniforms);
             let r1: PolyVec = (0..L)
                 .map(|i| std::array::from_fn(|j| red(x[i * N + j].mul_f64(NU).round())))
@@ -541,7 +584,9 @@ impl PartyKey {
             let r2: PolyVec = (0..K)
                 .map(|i| std::array::from_fn(|j| red(x[(L + i) * N + j].round())))
                 .collect();
+            let mut r2 = r2;
             let w = vec_add(&mat_vec_coeff(&key.a_hat, &r1), &r2);
+            r2.zeroize();
             Mask { x, r1, w }
         };
         let masks: Vec<Mask> = std::thread::scope(|scope| {
@@ -551,6 +596,14 @@ impl PartyKey {
                 .map(|thread| thread.join().expect("mask thread"))
                 .collect()
         });
+        // The uniforms determine the masks.
+        let mut uniforms = uniforms;
+        for (a, b) in uniforms.iter_mut().flatten() {
+            a.0.zeroize();
+            a.1.zeroize();
+            b.0.zeroize();
+            b.1.zeroize();
+        }
         let ws: Vec<PolyVec> = masks.iter().map(|m| m.w.clone()).collect();
         let cmt = commitment(&key.pk, self.index, &ws);
         (
@@ -572,6 +625,7 @@ impl PartyKey {
         commitments: &BTreeMap<u8, [u8; 32]>,
         revealed: &BTreeMap<u8, Vec<PolyVec>>,
     ) -> Option<Vec<Option<PolyVec>>> {
+        crate::ct::harden_thread();
         let active: Vec<u8> = revealed.keys().copied().collect();
         if revealed
             .iter()
@@ -595,7 +649,7 @@ impl PartyKey {
             .enumerate()
             .map(|(rep, mask)| {
                 let c = sample_in_ball(&challenge(&mu, revealed, rep));
-                let (v1, v2) = (challenge_mul(&c, &s1), challenge_mul(&c, &s2));
+                let (mut v1, mut v2) = (challenge_mul(&c, &s1), challenge_mul(&c, &s2));
                 // Imbalanced hyperball rejection (the paper's HRej): accept iff
                 // || (v1 / nu, v2) + x ||_2 <= r.
                 // |(v1/nu + x1, v2 + x2)|^2 <= r^2, multiplied through by nu^2 so that every
@@ -612,9 +666,23 @@ impl PartyKey {
                 }
                 let norm_sq = first.add(second.mul_f64(NU * NU));
                 let inside = norm_sq.0 < limit || (norm_sq.0 == limit && norm_sq.1 <= 0.0);
-                inside.then(|| vec_add(&v1, &mask.r1))
+                // `c s` is the share times a public challenge: it leaves only under the mask.
+                // Computed either way, so the work done does not depend on the outcome.
+                // A rejected response must not survive: it is what rejection exists to hide.
+                let mut z = vec_add(&v1, &mask.r1);
+                let response = if inside {
+                    Some(z)
+                } else {
+                    z.zeroize();
+                    None
+                };
+                v1.zeroize();
+                v2.zeroize();
+                response
             })
             .collect();
+        s1.zeroize();
+        s2.zeroize();
         debug_assert_eq!(state.index, self.index);
         Some(out)
     }

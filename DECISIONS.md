@@ -669,3 +669,31 @@ README). Two faults in `remote.sh` showed up and were fixed: `stop` killed a run
 call never returned. `mpc-phases.py` was added to read the phase costs from the bridge log.
 The `remote.sh` fixes were made after the server was deleted and have not been run.
 
+**D-129. The committee is the engine to rely on; the tower is the research engine.** The
+README now says so first. The committee's cryptography is complete and its key is generated
+jointly; the tower needs an MPC that exists here only as a semi-honest circuit or a clear-text
+stand-in, and a dealer. Work toward production goes to the committee.
+
+**D-130. `cairn keygen` warns every time it runs.** It is the one command where a single
+machine holds the whole key. It stays, because tests and the tower need it, but prints that
+its keys are for tests and names the joint path. docs/OPERATIONS.md gained the no-dealer
+setup, machine by machine, run as written before it was committed.
+
+**D-131. Secrets in the committee engine are erased on drop.** Shares, masks, the uniforms
+that determine them, `c s` products, rejected responses and the byte buffers of share files.
+The tower's engine already did this; the committee's did not.
+
+**D-132. Signing threads set the processor's data-independent-timing bit.** The first timing
+measurement of the response round found a 0.6% difference between an all-zero share and one
+at the bound on an Apple M3, with branch-free source. Setting arm64 DIT removed it, so
+`threshold_mldsa::ct::harden_thread` runs at the start of mask sampling and of the response
+round. It costs about 5% of the round. On x86-64 only the operating system can set the
+equivalent, which docs/SAMPLER.md states; the measurement has not been made there.
+
+**D-133. Hostile-input tests in the ordinary suite, not a fuzzer yet.** Every parser of bytes
+from the network or from another party's file (frames, openings, key and share files,
+checkpoints, approvals, rosters, address books, certificates) is fed seeded random and
+damaged input, and a live KMS endpoint is sent garbage and must keep serving. It found
+nothing. Coverage-guided fuzzing (`cargo fuzz`) would go deeper; it needs a tool that is not
+installed here and a nightly compiler, so it is left as the next step.
+

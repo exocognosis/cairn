@@ -16,6 +16,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use threshold_mldsa::TrustedEngine;
 
+/// Printed by every `keygen`: the one command where a single machine holds the whole key.
+const DEALER_WARNING: &str = "cairn keygen: TRUSTED DEALER. This machine just held the whole \
+signing key, so use these keys for tests only. A committee you rely on generates its key \
+jointly: `cairn committee-init`, `cairn dkg-party`, `cairn dkg`.";
+
 const USAGE: &str = "\
 cairn: committee-tower threshold ML-DSA-65 checkpoint signing (v2, research build)
 
@@ -31,7 +36,7 @@ Single process (simulation harness):
 
 Multi-process cluster:
   cairn keygen --out <dir> [--seed-hex <64 hex>] [--host <ip>] [--base-port <port>]
-      Trusted-dealer setup: writes group.bin, one .share file per signer, peers.json,
+      Trusted-dealer setup (tests only; the tower has no joint key generation): writes group.bin, one .share file per signer, peers.json,
       public_key.hex and tls/ (one self-signed certificate and key per node, pinned).
   cairn node --role signer|root --id <leaf_i/signer_j|root_k> --bind <addr:port>
              --peers <peers.json|id=addr,...> --group <group.bin> --tls <dir>
@@ -625,6 +630,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         Some("keygen") => {
             let out = PathBuf::from(arg(args, "--out").ok_or("keygen needs --out <dir>")?);
+            eprintln!("{DEALER_WARNING}");
             let host = arg(args, "--host").unwrap_or_else(|| "127.0.0.1".into());
             let base: u16 = arg(args, "--base-port")
                 .map_or(Ok(7100), |v| v.parse())
@@ -650,7 +656,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 }
                 println!(
                     "{}",
-                    json!({ "out": out, "committee": spec, "nodes": peers.len(), "key_id": hex::encode(cairn_sidecar::key_id(&key.pk)) })
+                    json!({ "out": out, "committee": spec, "nodes": peers.len(), "key_id": hex::encode(cairn_sidecar::key_id(&key.pk)), "dealer": "trusted" })
                 );
                 return Ok(());
             }
@@ -663,7 +669,7 @@ fn run(args: &[String]) -> Result<(), String> {
             write_public_key(&out.join("public_key.hex"), &group.pk).map_err(|e| e.to_string())?;
             println!(
                 "{}",
-                json!({ "out": out, "signers": shares.len(), "nodes": peers.len(), "key_id": hex::encode(cairn_sidecar::key_id(&group.pk)) })
+                json!({ "out": out, "signers": shares.len(), "nodes": peers.len(), "key_id": hex::encode(cairn_sidecar::key_id(&group.pk)), "dealer": "trusted" })
             );
             Ok(())
         }

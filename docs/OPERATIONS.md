@@ -14,6 +14,50 @@ run the software carefully, not a claim that it is ready to hold a valuable key.
 Public and safe to copy anywhere: `committee.bin`, `roster.json`, `peers.json`,
 `tls/fingerprints.json`, `tls/*.pem`.
 
+## Creating the key with no dealer
+
+For a committee you rely on, no machine may ever hold the whole key. Each operator does steps
+1 to 3 on their own machine; nothing secret leaves it. (`cairn keygen` is a trusted dealer and
+says so when it runs: tests only. `cairn committee-init` does steps 1 to 3 for every party on
+one machine, for local trials.) This sequence was run as written, one directory per machine.
+
+1. **Identity and certificate.** Each party, and the machine that will coordinate:
+
+   ```bash
+   cairn identity --out identity.key
+   ```
+
+   ```bash
+   cairn tls-rotate --tls tls --id party_2
+   ```
+
+   The first prints the party's public identity, the second its certificate fingerprint. The
+   coordinator needs only the second, with `--id coordinator`.
+2. **Exchange the public values** over a channel you trust, and agree on the party numbers.
+   Everyone writes the same two files: `roster.json`,
+   `{"threshold": 2, "identities": ["<party_1 public>", "<party_2 public>", "<party_3 public>"]}`,
+   and `peers.json`, `{"party_1": "<addr:port>", "party_2": "...", "party_3": "..."}`.
+3. **Pin every other machine's certificate** (once per other party and for the coordinator):
+
+   ```bash
+   cairn tls-pin --tls tls --id party_1 --fingerprint <party_1 fingerprint>
+   ```
+
+4. **Each party waits for key generation:**
+
+   ```bash
+   cairn dkg-party --id party_2 --bind <addr:port> --roster roster.json --identity identity.key --tls tls --out keys
+   ```
+
+5. **The coordinator drives one run:**
+
+   ```bash
+   cairn dkg --roster roster.json --peers peers.json --tls tls --public-key-out public_key.hex
+   ```
+
+   Every party writes `keys/committee.bin` and its own share and exits. Compare the printed
+   `key_id` across operators before using the key, then back up as below.
+
 ## Backup
 
 - **Back up cold, once:** each party's share, identity key and `committee.bin`, encrypted, to

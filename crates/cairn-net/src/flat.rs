@@ -890,7 +890,7 @@ pub fn write_flat_keys(dir: &Path, key: &GroupKey, parties: &[PartyKey]) -> std:
             .create_new(true)
             .mode(0o600)
             .open(path)?;
-        std::io::Write::write_all(&mut f, &party.to_bytes())?;
+        std::io::Write::write_all(&mut f, &zeroize::Zeroizing::new(party.to_bytes()))?;
     }
     ids.push(NodeId::Coordinator);
     ClusterTls::generate(&ids)?.write(&dir.join("tls"))
@@ -907,7 +907,7 @@ pub fn write_party_files(dir: &Path, key: &GroupKey, share: &PartyKey) -> std::i
         .create_new(true)
         .mode(0o600)
         .open(path)?;
-    std::io::Write::write_all(&mut f, &share.to_bytes())
+    std::io::Write::write_all(&mut f, &zeroize::Zeroizing::new(share.to_bytes()))
 }
 
 pub fn read_committee(path: &Path) -> std::io::Result<GroupKey> {
@@ -916,7 +916,7 @@ pub fn read_committee(path: &Path) -> std::io::Result<GroupKey> {
 }
 
 pub fn read_party_share(path: &Path) -> std::io::Result<PartyKey> {
-    PartyKey::from_bytes(&std::fs::read(path)?)
+    PartyKey::from_bytes(&zeroize::Zeroizing::new(std::fs::read(path)?))
         .ok_or_else(|| std::io::Error::other("malformed party share file"))
 }
 
