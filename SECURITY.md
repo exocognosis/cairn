@@ -32,7 +32,7 @@ ask not to be. There is no bounty.
 
 ## Checking a release
 
-Release archives have SHA-256 checksums and, after 0.7.1, a signed build provenance
+Release archives have SHA-256 checksums and, from 0.7.2, a signed build provenance
 statement. docs/RELEASING.md shows how to verify it and how to rebuild a release from its tag
 and compare.
 
