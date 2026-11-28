@@ -116,10 +116,18 @@ fn response_round_time_does_not_depend_on_the_share() {
     // measured comes from the machine and the method, not from the data.
     let control = std::env::var_os("CAIRN_TIMING_CONTROL").is_some();
     let bound = |j: usize| if j % 2 == 0 { ETA } else { Q - ETA };
-    let classes = [
-        share(0, &parties[0], |j| if control { bound(j) } else { 0 }),
-        share(0, &parties[0], bound),
-    ];
+    // CAIRN_TIMING_SWAP=1 builds the two shares in the other order. If a difference follows
+    // the share it comes from the data; if it stays with the slot it comes from where the
+    // two objects happen to sit in memory.
+    let swap = std::env::var_os("CAIRN_TIMING_SWAP").is_some();
+    let zero = |j: usize| if control { bound(j) } else { 0 };
+    let classes = if swap {
+        let second = share(0, &parties[0], bound);
+        let first = share(0, &parties[0], zero);
+        [first, second]
+    } else {
+        [share(0, &parties[0], zero), share(0, &parties[0], bound)]
+    };
     // The other active party's openings are public and the same for every sample.
     let (other, other_commitment) = parties[1].round1(&key, &mut OsRng);
     let message = b"timing";

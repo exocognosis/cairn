@@ -22,7 +22,10 @@ rebuild it as described below. This step has not run yet: it was added after the
 
 1. `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
    `cargo test --workspace`, `scripts/ct-check.sh`.
-2. On an arm64 machine, `scripts/timing-check.sh`.
+2. On a quiet arm64 machine, `scripts/timing-check.sh`. Its response-round test compares an
+   all-zero share with one at the bound and is known to fail about one run in four for the
+   reason in docs/SAMPLER.md ("a smaller difference remains"). A failure there with t
+   above about 8, or any failure of the mask-round test, is new and blocks the tag.
 3. Set the version in `Cargo.toml` and `CITATION.cff`; run `cargo build` so `Cargo.lock`
    follows.
 4. If `NET_VERSION` changed since the last tag, say so in docs/OPERATIONS.md under

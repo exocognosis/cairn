@@ -97,6 +97,22 @@ gives the party's share. So the sampler must not take input-dependent paths.
   about 5% of the round. Limits: one processor; one committee size (2-of-3); a
   statistical test finds differences, it does not prove there are none; and on x86-64 the
   equivalent setting (DOITM) belongs to the operating system, so cairn cannot turn it on there.
+- **Corrected the same day: a smaller difference remains, for an all-zero share only.**
+  Run again on a quiet machine before the 0.7.2 tag, the same test fails about one time in
+  four: the zero share is 1 to 2 of 770 microseconds *slower*, t between 1.6 and 5.2 over
+  seven runs, and 1.0 and 1.6 in control runs. The commit before that day's changes gives t
+  of 6.4 to 7.4, so the difference was there all along; the passing runs above were taken
+  while a long signing test was running, and its noise hid it. Building the two shares in the
+  other order does not move it, so it follows the data. It comes from the multiplication of
+  the challenge by the share: `tests/timing_locate.rs` times that step alone, 200,000 times,
+  and finds it 0.5% slower for an all-zero input than for one at the bound (t of 30 and 55),
+  while two different shares with random small coefficients, which is what real shares look
+  like, do not differ (t of -2.2 and 1.7, against 1.9 and 1.1 for a share and its own copy).
+  So with data-independent timing switched on, this processor still treats a vector of zeros
+  differently. The cause is not known; the source has no branch or lookup on the values. A
+  real share is never all zero, and no difference was found between realistic shares, but
+  "the processor's timing depends on the values in some case" is established and how far
+  that reaches (sparse shares, partial sums) is not measured.
 - **The mask round, measured (2026-11-27).** The same script times round 1, which samples
   the masks, for the same randomness every time against fresh randomness each time: t of
   0.7, -0.6, -0.1 and -1.8 over four runs of 4,000 samples, and -0.2 and -1.2 in control

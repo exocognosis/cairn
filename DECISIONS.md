@@ -801,3 +801,16 @@ waiting for both; the node listener allows 10 s for the handshake. Not changed: 
 between cluster nodes stay open while idle, because they are pooled and their peer is
 authenticated. Not solved: no limit on connections per client (docs/BLOCKERS.md item 18c).
 The TLS front's change is covered by the existing HTTPS test only; no test stalls it.
+
+**D-143. The response round's timing claim was too strong; corrected.** D-138 and
+docs/SAMPLER.md said the share-dependent time found on the M3 went away with
+data-independent timing switched on. Measured again on a quiet machine while preparing
+0.7.2, a difference of 1 to 2 microseconds in 770 remains between an all-zero share and one at
+the bound, and it was present in every earlier commit checked: the earlier passing runs were
+noisy. It is located in the challenge-times-share multiplication and appears only for an
+all-zero input; realistic shares do not differ at 200,000 samples (`tests/timing_locate.rs`).
+Cause unknown. The response-round test is left as it is, failing about one run in four,
+because changing its classes until it passes would hide a real observation; the release
+checklist says what a failure there means. `CAIRN_TIMING_SWAP=1` builds the two shares in the
+other order to tell data from memory layout. Lesson recorded: a timing measurement taken
+on a busy machine can pass for the wrong reason.
