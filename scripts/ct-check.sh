@@ -32,8 +32,9 @@ for name in ("ln", "cos_sin_turn"):
     # A fixed-count loop keeps one branch on its counter. Accept a conditional branch only
     # when the flags it reads were set by an integer instruction with no floating-point
     # operand (the series loops count terms; the quadrant and exponent never reach a compare).
-    flags = re.compile(r"^(subs|adds|cmp|cmn|tst|ands|ccmp|fcmp|fcmpe|fccmp|sub|add|dec|inc|test|and|or|xor|u?comis[sd])\b")
-    integer = re.compile(r"^(subs|adds|cmp|cmn|tst|ands|sub|add|dec|inc|test)\s+(?!.*\b([dsv]\d+|xmm\d+)\b)")
+    # x86-64 mnemonics carry a size suffix in this syntax (addq, cmpq).
+    flags = re.compile(r"^(subs|adds|cmn|tst|ands|ccmp|fcmp|fcmpe|fccmp|(cmp|sub|add|dec|inc|test|and|or|xor)[bwlq]?|u?comis[sd])\b")
+    integer = re.compile(r"^(subs|adds|cmn|tst|ands|(cmp|sub|add|dec|inc|test)[bwlq]?)\s+(?!.*\b([dsv]\d+|xmm\d+)\b)")
     bad, counters = [], 0
     for at, l in enumerate(body):
         if call.match(l):

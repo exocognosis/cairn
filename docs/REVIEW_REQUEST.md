@@ -46,7 +46,7 @@ knows. It is an argument, not a proof.
 
 **5. Side channels (1 to 2 hours)**
 docs/SAMPLER.md, section "Timing". Source-level branch-freedom, a check of the compiled
-sampler (`scripts/ct-check.sh`, arm64 only), and a timing measurement
+sampler (`scripts/ct-check.sh`, arm64 and x86-64), and a timing measurement
 (`scripts/timing-check.sh`) that found one leak on an Apple M3 and reduced it with the
 processor's data-independent-timing bit. A smaller difference remains for an all-zero share
 only, located in the share multiplication, cause unknown. x86-64 has not been measured. Is the method

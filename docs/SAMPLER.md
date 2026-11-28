@@ -97,6 +97,29 @@ gives the party's share. So the sampler must not take input-dependent paths.
   about 5% of the round. Limits: one processor; one committee size (2-of-3); a
   statistical test finds differences, it does not prove there are none; and on x86-64 the
   equivalent setting (DOITM) belongs to the operating system, so cairn cannot turn it on there.
+- **x86-64 measured, and a branch found and removed (2026-11-28).** The same measurements
+  on a rented server with two dedicated cores (AMD EPYC Milan, Linux, no timing protection
+  available), at commit 4fa1b16. Response round: t of -0.1, -0.6, -0.4; controls -0.4, 0.8.
+  The share multiplication alone: all-zero against bound t of -0.4 and -0.3, and nothing
+  for sparse shares or sums. So the M3's effect does not appear on this processor. The mask
+  round did differ: the same randomness every time ran 13 to 25 of 4700 microseconds faster
+  than fresh randomness, t of -4.6, -3.0, -5.8, with controls at -0.6 and 0.3. The cause was
+  one line. The first uniform's low part was built with `(b * 0.5).floor()`; on x86-64
+  without SSE4.1, which is what the release is built for, `floor` is a library routine with
+  branches, and it was called once per pair on a random bit. Repeated randomness trained the
+  branch predictor; fresh randomness did not. arm64 has an instruction for it, which is why
+  the M3 never showed this. The bit that decided the branch is the one the expression
+  discards, so the branch said nothing about the mask, but it was data-dependent control
+  flow in the sampler all the same. It is now `b | 1` on the integer, the same value
+  exactly. After the change: t of -0.7, 1.2, 1.1, 1.3 over four runs, and the round is about
+  60 microseconds faster. `scripts/ct-check.sh` now reads x86-64 code as well and passes
+  there (logarithm 450 instructions, cosine and sine 524, one loop counter each); it had
+  only ever been run on arm64, and it does not cover the line that had the branch, which
+  is outside the two functions it reads. Sampler steps on this processor: the method's own
+  floor reaches t of about 4 on a virtual machine; the logarithm of a power of two is 0.1%
+  slower than of a random value (t of 5.3 and 8.9), an input that does not occur; the whole
+  sampler on all-identical uniforms shows nothing (t of -1.2 and 0.0). One processor model,
+  one afternoon.
 - **How far it reaches (2026-11-28).** `tests/timing_locate.rs` now also times shares between
   the extremes, each against a full random share, 200,000 times. One non-zero coefficient
   per polynomial: 0.05% *faster*, t of -6.5 and -11.8 in two runs, so the effect is real and

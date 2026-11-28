@@ -146,7 +146,7 @@ listen beyond loopback without credentials; parties and the coordinator write au
 **It has had no outside review.** It has been compared line by line with the authors' public
 code and signs together with it; masks are sampled in double-double arithmetic; one timing
 leak was measured and reduced on arm64 (a small difference remains for an all-zero share,
-docs/SAMPLER.md), and x86-64 has not been measured. It was measured
+docs/SAMPLER.md); on x86-64, one processor was measured and one data-dependent branch found and removed. It was measured
 across hosts only on one link. In place of a review there are measurements, each with a
 stated reach: a statistical test for share leakage in published responses, 600-key runs
 against the authors' code, and coverage-guided fuzzing (DECISIONS.md D-140). Cost also rises steeply with the threshold, so small thresholds are the

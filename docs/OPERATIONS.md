@@ -177,6 +177,10 @@ Both may be up at once. The parties, not the coordinators, enforce one checkpoin
   approvals directory to one file beside the rule file. The old files are ignored, so a
   payload whose window had closed can be authorized once more until its approvals expire.
   Upgrade when no approved payload is in that state, or remove its approvals first.
+- **0.7.2 to 0.7.3 with an organization rule file:** a party now writes `<use record>.clock`
+  beside the use record and refuses if it cannot. Nothing to migrate; make sure the party
+  can create files in that directory. The HTTPS front and the KMS endpoint now refuse
+  connections past 256 at once (32 from one address on the front).
 - A release binary can be rebuilt from its tag and compared: docs/RELEASING.md.
 - `scripts/upgrade-rehearsal.sh` rehearses both on one machine and one key: v0.3.0 to v0.4.0
   rolling (wire version 2 in both), then to the current build with a stop (wire version 3),

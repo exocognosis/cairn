@@ -23,7 +23,9 @@ digest. The verify command above has not been run against a downloaded 0.7.2 arc
 
 1. `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
    `cargo test --workspace`, `scripts/ct-check.sh`.
-2. On a quiet arm64 machine, `scripts/timing-check.sh`. Its response-round test compares an
+2. On a quiet arm64 machine, `scripts/timing-check.sh`. (An x86-64 machine with dedicated
+   cores is worth the few cents when the sampler or the arithmetic changed: the one
+   data-dependent branch found so far showed only there, D-145.) Its response-round test compares an
    all-zero share with one at the bound and is known to fail about one run in four for the
    reason in docs/SAMPLER.md ("a smaller difference remains"). A failure there with t
    above about 8, or any failure of the mask-round test, is new and blocks the tag.

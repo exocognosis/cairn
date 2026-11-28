@@ -533,13 +533,13 @@ pub(crate) fn ball_from_uniforms(radius: f64, uniforms: &[(Dd, Dd)]) -> Vec<Dd> 
 /// all 53 bits it rounded, and could reach 1.
 fn uniform_pair<R: Rng + CryptoRng>(rng: &mut R) -> (Dd, Dd) {
     const STEP: f64 = 1.0 / (1u64 << 53) as f64;
-    let mut bits = || (rng.next_u64() >> 11) as f64;
-    let (a1, b1, a2, b2) = (bits(), bits(), bits(), bits());
+    let mut bits = || rng.next_u64() >> 11;
+    let (a1, b1, a2, b2) = (bits() as f64, bits(), bits() as f64, bits() as f64);
+    // The low bit is set as an integer: `floor` is a library routine with branches on
+    // x86-64 without SSE4.1, and it was taken on a random bit once per pair.
+    let b1 = (b1 | 1) as f64;
     (
-        Dd::from_sum(
-            a1 * STEP,
-            (2.0 * (b1 * 0.5).floor() + 1.0) * (STEP * STEP * 0.5),
-        ),
+        Dd::from_sum(a1 * STEP, b1 * (STEP * STEP * 0.5)),
         Dd::from_sum(a2 * STEP, b2 * (STEP * STEP)),
     )
 }

@@ -834,3 +834,15 @@ with the opposite sign, and no further; the sampler's steps show no operand-depe
 or spread one at a time; the whole sampler on all-identical uniforms is about 0.1% faster in
 three runs of four. Both effects are confined to inputs that do not occur, and neither is
 explained.
+
+**D-145. x86-64 timing measured; a data-dependent branch in the uniform draw removed.**
+Measured on a rented two-core dedicated server (AMD EPYC Milan), deleted afterwards. The
+response round and the share multiplication show no share-dependent time there, so the
+M3's all-zero effect is that processor's. The mask round was 0.3 to 0.5% faster for repeated
+randomness (t to -5.8): `uniform_pair` called `floor`, which on baseline x86-64 is a library
+routine with branches, once per pair on a random bit. Replaced by `b | 1` on the integer,
+which is the same value; t is now within 1.3. The deciding bit was one the expression threw
+away, so nothing about the mask leaked, but the lesson stands: the compiled-code check read
+two functions on one architecture, and the branch was in neither. The check now runs on
+x86-64 too. Not done: a check of every floating-point call in the signing path on every
+target the release builds for, and any Intel processor.

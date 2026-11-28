@@ -4,7 +4,7 @@ members = ["crates/threshold-mldsa", "crates/cascade-tower", "crates/mpc-bridge"
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.7.2"
+version = "0.7.3"
 edition = "2021"
 rust-version = "1.80"
 publish = false
