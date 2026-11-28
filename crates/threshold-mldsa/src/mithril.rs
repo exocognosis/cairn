@@ -311,6 +311,7 @@ pub fn derive_subset_secret(
     seed: &[u8; 32],
     randomness: &[u8],
 ) -> (PolyVec, PolyVec) {
+    crate::ct::harden_thread();
     let mut expanded = [0u8; 64];
     shake256(
         &[
@@ -322,11 +323,14 @@ pub fn derive_subset_secret(
         ],
         &mut expanded,
     );
-    fips204::expand_s(&expanded)
+    let secret = fips204::expand_s(&expanded);
+    expanded.zeroize();
+    secret
 }
 
 /// `t_S = A s1_S + s2_S` for a subset secret under the matrix seeded by `rho`.
 pub fn subset_public(rho: &[u8; 32], secret: &(PolyVec, PolyVec)) -> PolyVec {
+    crate::ct::harden_thread();
     vec_add(&mat_vec_coeff(&expand_a(rho), &secret.0), &secret.1)
 }
 
@@ -358,6 +362,7 @@ pub fn keygen<R: Rng + CryptoRng>(
     rng: &mut R,
 ) -> Option<(GroupKey, Vec<PartyKey>)> {
     let params = params_65(t, n)?;
+    crate::ct::harden_thread();
     let rho: [u8; 32] = rng.gen();
     let a_hat = expand_a(&rho);
     let mut parties: Vec<PartyKey> = (0..n as u8)
@@ -366,13 +371,22 @@ pub fn keygen<R: Rng + CryptoRng>(
             shares: BTreeMap::new(),
         })
         .collect();
-    let (mut s1, mut s2) = (vec_zero(L), vec_zero(K));
+    // The dealer's copies of the whole key and of each part are erased when it is done: only
+    // the parties' shares remain.
+    let mut s1 = zeroize::Zeroizing::new(vec_zero(L));
+    let mut s2 = zeroize::Zeroizing::new(vec_zero(K));
     let mut subset_keys = BTreeMap::new();
     for subset in subsets(n, n - t + 1) {
-        let part1: PolyVec = (0..L).map(|_| short_poly(rng)).collect();
-        let part2: PolyVec = (0..K).map(|_| short_poly(rng)).collect();
-        s1 = vec_add(&s1, &part1);
-        s2 = vec_add(&s2, &part2);
+        let part1: zeroize::Zeroizing<PolyVec> =
+            zeroize::Zeroizing::new((0..L).map(|_| short_poly(rng)).collect());
+        let part2: zeroize::Zeroizing<PolyVec> =
+            zeroize::Zeroizing::new((0..K).map(|_| short_poly(rng)).collect());
+        for (sum, part) in s1.iter_mut().zip(part1.iter()) {
+            *sum = crate::fips204::poly_add(sum, part);
+        }
+        for (sum, part) in s2.iter_mut().zip(part2.iter()) {
+            *sum = crate::fips204::poly_add(sum, part);
+        }
         subset_keys.insert(
             subset.clone(),
             vec_add(&mat_vec_coeff(&a_hat, &part1), &part2),
@@ -380,7 +394,7 @@ pub fn keygen<R: Rng + CryptoRng>(
         for i in &subset {
             parties[*i as usize]
                 .shares
-                .insert(subset.clone(), (part1.clone(), part2.clone()));
+                .insert(subset.clone(), ((*part1).clone(), (*part2).clone()));
         }
     }
     let t_full = vec_add(&mat_vec_coeff(&a_hat, &s1), &s2);
@@ -496,10 +510,20 @@ pub(crate) fn ball_from_uniforms(radius: f64, uniforms: &[(Dd, Dd)]) -> Vec<Dd> 
         g.push(radial.mul(cos));
         g.push(radial.mul(sin));
     }
-    let norm = g.iter().fold(Dd::ZERO, |sum, x| sum.add(x.mul(*x))).sqrt();
-    let scale = Dd(radius, 0.0).div(norm);
+    let mut norm = g.iter().fold(Dd::ZERO, |sum, x| sum.add(x.mul(*x))).sqrt();
+    let mut scale = Dd(radius, 0.0).div(norm);
+    // The two dropped Gaussians and the norm come from the same randomness as the mask:
+    // erased, not left in the spare room of the vector.
+    for dropped in &mut g[DIM..] {
+        dropped.0.zeroize();
+        dropped.1.zeroize();
+    }
     g.truncate(DIM);
     g.iter_mut().for_each(|x| *x = x.mul(scale));
+    norm.0.zeroize();
+    norm.1.zeroize();
+    scale.0.zeroize();
+    scale.1.zeroize();
     g
 }
 
@@ -930,6 +954,10 @@ pub fn sign_local<R: Rng + CryptoRng>(
 #[cfg(test)]
 #[path = "mithril_interop.rs"]
 mod interop;
+
+#[cfg(test)]
+#[path = "sampler_timing.rs"]
+mod sampler_timing;
 
 #[cfg(test)]
 #[path = "sampler_precision.rs"]

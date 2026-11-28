@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use threshold_mldsa::fips204::{self, PolyVec, K};
 use threshold_mldsa::mithril::{self, GroupKey, PartyKey, Subset};
+use zeroize::Zeroize;
 
 #[path = "recover.rs"]
 pub mod recover;
@@ -173,6 +174,20 @@ fn seal_key(
         .expand(info, &aead::CHACHA20_POLY1305)
         .map_err(|_| "key derivation failed")?;
     Ok(aead::LessSafeKey::new(okm.into()))
+}
+
+impl Drop for DkgParty {
+    /// A seed gives a subset's secret to anyone who also saw the public randomness. Neither
+    /// it nor a secret that was not handed on as a key share outlives the run, however it ends.
+    fn drop(&mut self) {
+        for seed in self.seeds.values_mut() {
+            seed.zeroize();
+        }
+        for (s1, s2) in self.secrets.values_mut() {
+            s1.zeroize();
+            s2.zeroize();
+        }
+    }
 }
 
 fn commit_randomness(index: u8, r: &Bytes32) -> Bytes32 {
@@ -340,7 +355,7 @@ impl DkgParty {
             .into_iter()
             .filter(|s| s[0] == self.index)
         {
-            let seed: Bytes32 = rand::random();
+            let mut seed: Bytes32 = rand::random();
             for member in subset.iter().filter(|m| **m != self.index) {
                 per_peer
                     .entry(*member)
@@ -348,6 +363,7 @@ impl DkgParty {
                     .extend_from_slice(&seed);
             }
             self.seeds.insert(subset, seed);
+            seed.zeroize();
         }
         let mut sealed = Vec::new();
         for (peer, mut plaintext) in per_peer {
@@ -398,13 +414,16 @@ impl DkgParty {
             if led.is_empty() {
                 continue;
             }
-            let mut ciphertext = commits[leader as usize]
-                .sealed
-                .iter()
-                .find(|(to, _)| *to == self.index)
-                .ok_or_else(|| format!("party {} sent us no seeds", leader + 1))?
-                .1
-                .clone();
+            // Decrypted in place, so this buffer holds the seeds: erased on every way out.
+            let mut ciphertext = zeroize::Zeroizing::new(
+                commits[leader as usize]
+                    .sealed
+                    .iter()
+                    .find(|(to, _)| *to == self.index)
+                    .ok_or_else(|| format!("party {} sent us no seeds", leader + 1))?
+                    .1
+                    .clone(),
+            );
             let their = self.hellos[leader as usize]
                 .ephemeral
                 .iter()
@@ -601,7 +620,10 @@ impl DkgParty {
             subset_keys,
         )
         .ok_or("no parameter set for this committee")?;
-        Ok((key, PartyKey::from_shares(self.index, self.secrets)))
+        Ok((
+            key,
+            PartyKey::from_shares(self.index, std::mem::take(&mut self.secrets)),
+        ))
     }
 }
 

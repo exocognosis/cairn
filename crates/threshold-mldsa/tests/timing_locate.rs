@@ -62,4 +62,59 @@ fn share_multiplication_time_by_input() {
     compare("zero share against bound share", &c, [&zero, &bound]);
     compare("two random small shares", &c, [&one, &other]);
     compare("one share against its copy", &c, [&one, &copy]);
+
+    // How far the all-zero effect reaches. A share with only `count` non-zero coefficients
+    // per polynomial, against a full one; and a sum of several shares, which is what the
+    // response round multiplies when a party holds more than one subset's secret.
+    let sparse = |count: usize| -> PolyVec {
+        (0..5)
+            .map(|_| {
+                let mut p: Poly = [0; N];
+                for slot in p.iter_mut().take(count) {
+                    *slot = [1, 2, 3, 4, Q - 1, Q - 2, Q - 3, Q - 4][OsRng.gen_range(0..8)];
+                }
+                // Spread over the polynomial, not left at the front.
+                for j in (1..N).rev() {
+                    p.swap(j, OsRng.gen_range(0..=j));
+                }
+                p
+            })
+            .collect()
+    };
+    for count in [1, 4, 16, 64, 128] {
+        compare(
+            &format!("{count} non-zero coefficients of 256 against a full share"),
+            &c,
+            [&sparse(count), &one],
+        );
+    }
+    let one_zero_poly: PolyVec = {
+        let mut v = other.clone();
+        v[0] = [0; N];
+        v
+    };
+    compare(
+        "one polynomial of five all zero against a full share",
+        &c,
+        [&one_zero_poly, &one],
+    );
+    let sum = |parts: usize| -> PolyVec {
+        (0..5)
+            .map(|_| {
+                std::array::from_fn(|_| {
+                    (0..parts)
+                        .map(|_| OsRng.gen_range(-4i32..=4))
+                        .sum::<i32>()
+                        .rem_euclid(Q)
+                })
+            })
+            .collect()
+    };
+    for parts in [2, 5, 10] {
+        compare(
+            &format!("a sum of {parts} shares against one share"),
+            &c,
+            [&sum(parts), &one],
+        );
+    }
 }

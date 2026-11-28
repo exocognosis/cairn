@@ -72,6 +72,11 @@ one machine, for local trials.) This sequence was run as written, one directory 
   the payloads this party has authorized and when. Do not delete or restore it: a running
   party stops authorizing if an entry goes missing, and an old copy on a restarted party
   reopens the windows the copy does not list. See docs/ORG_POLICY.md.
+- **The decision clock (`<use record>.clock`)** holds the latest time this party has decided
+  at. Leave it alone; delete it only to recover from a clock that was set forward by
+  mistake, with the party stopped. See "Clocks" in docs/ORG_POLICY.md.
+- **Timing protection.** A party prints at startup whether data-independent timing is on.
+  On arm64 with DIT it is; on x86-64 it says it is not, and nothing in cairn can turn it on.
 - A lost share with no backup: `cairn share-recover` on the new machine, `cairn share-help` on
   enough others (tested end to end on 3-of-4; see `recover` unit tests).
 

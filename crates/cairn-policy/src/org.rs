@@ -275,6 +275,46 @@ pub struct OrgGovernancePolicy {
     use_record: Option<PathBuf>,
     /// First uses this party knows of, by payload digest.
     used: std::sync::Mutex<BTreeMap<[u8; 32], u64>>,
+    /// The latest time this party has decided at. Decisions never use an earlier one, so
+    /// setting the machine's clock back revives no approval and reopens no use window.
+    latest: std::sync::Mutex<u64>,
+    /// Where `latest` is kept across restarts: beside the use record, when there is one.
+    clock_file: Option<PathBuf>,
+    wall: Box<dyn Fn() -> u64 + Send + Sync>,
+}
+
+/// The time in a clock file. A file that does not exist is time zero; one that cannot be read
+/// is an error.
+fn read_clock(path: &Path) -> std::io::Result<u64> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => text
+            .trim()
+            .parse()
+            .map_err(|_| std::io::Error::other("unreadable clock file")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
+/// Replace the clock file with `at`: written beside it and renamed, so a crash leaves the old
+/// time or the new one.
+fn write_clock(path: &Path, at: u64) -> std::io::Result<()> {
+    // Parties may share one rule file, and so one clock file: each writes its own temporary.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = PathBuf::from(format!(
+        "{}.{}.{}.tmp",
+        path.display(),
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut f = options.open(&tmp)?;
+    writeln!(f, "{at}")?;
+    f.sync_data()?;
+    std::fs::rename(&tmp, path)
 }
 
 /// The first uses in a record file: one `<payload digest hex> <unix time>` per line. A file
@@ -313,7 +353,18 @@ impl OrgGovernancePolicy {
             Some(file) => read_use_record(file).map_err(|e| format!("{}: {e}", file.display()))?,
             None => BTreeMap::new(),
         };
+        let clock_file = config
+            .use_record
+            .as_ref()
+            .map(|file| PathBuf::from(format!("{}.clock", file.display())));
+        let latest = match &clock_file {
+            Some(file) => read_clock(file).map_err(|e| format!("{}: {e}", file.display()))?,
+            None => 0,
+        };
         Ok(Self {
+            latest: std::sync::Mutex::new(latest),
+            clock_file,
+            wall: Box::new(now),
             use_record: config.use_record,
             used: std::sync::Mutex::new(used),
             committee_key_id: key_id(committee_pk),
@@ -335,6 +386,32 @@ impl OrgGovernancePolicy {
             *current = (Rule::build(&config)?, bytes);
         }
         Ok(())
+    }
+
+    /// The time to decide at: the machine's clock, or the latest time already decided at if
+    /// the clock is behind it. An advance is written down before it is used; if that fails
+    /// the time is still returned, with the error, so that the refusal can be logged.
+    fn time(&self) -> (u64, std::io::Result<()>) {
+        let mut latest = self.latest.lock().expect("clock");
+        let mut at = (self.wall)().max(*latest);
+        if at > *latest {
+            if let Some(file) = &self.clock_file {
+                // Another party sharing the file may be ahead: its time stands.
+                let written = read_clock(file).and_then(|on_disk| {
+                    at = at.max(on_disk);
+                    if at > on_disk {
+                        write_clock(file, at)
+                    } else {
+                        Ok(())
+                    }
+                });
+                if let Err(e) = written {
+                    return (at, Err(e));
+                }
+            }
+            *latest = at;
+        }
+        (at, Ok(()))
     }
 
     /// With a use window: when this party first authorized `digest`, recorded now if never.
@@ -420,7 +497,7 @@ impl OrgGovernancePolicy {
 impl PolicyEngine for OrgGovernancePolicy {
     fn authorize_sign(&self, ctx: &SignContext, payload: &[u8]) -> Result<(), PolicyError> {
         let digest: [u8; 32] = Sha3_256::digest(payload).into();
-        let at = now();
+        let (at, clock) = self.time();
         let mut current = self.rule.lock().expect("organization rule");
         let refuse = |event: &str, reason: String| {
             // Best effort: a refusal stands whether or not it could be logged.
@@ -433,6 +510,9 @@ impl PolicyEngine for OrgGovernancePolicy {
             }));
             Err(PolicyError::Refused(reason))
         };
+        if let Err(e) = clock {
+            return refuse("refused", format!("cannot record the time: {e}"));
+        }
         if let Err(e) = self.refresh(&mut current) {
             return refuse(
                 "rule_unusable",
@@ -683,6 +763,56 @@ mod tests {
         write_rule(&dir, &[&keys[0], &keys[1], &keys[2]], 2, None);
         assert!(policy.authorize_sign(&CTX, payload).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_clock_set_back_does_not_reopen_a_window_or_revive_an_approval() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let (dir, keys, mut policy) = setup("rollback", 2);
+        write_rule(&dir, &[&keys[0], &keys[1], &keys[2]], 2, Some(60));
+        let clock = std::sync::Arc::new(AtomicU64::new(1_000_000));
+        let wall = clock.clone();
+        policy.wall = Box::new(move || wall.load(Ordering::SeqCst));
+        let approve = |payload: &[u8], not_after: u64| {
+            for key in [&keys[0], &keys[1]] {
+                key.approve(b"committee", payload, not_after)
+                    .write(&dir)
+                    .unwrap();
+            }
+        };
+        approve(b"windowed", 2_000_000);
+        approve(b"short-lived", 1_000_050);
+        assert!(policy.authorize_sign(&CTX, b"windowed").is_ok());
+
+        // Time passes: the window closes and the short approval expires.
+        clock.store(1_000_100, Ordering::SeqCst);
+        assert!(policy.authorize_sign(&CTX, b"windowed").is_err());
+        assert!(policy.authorize_sign(&CTX, b"short-lived").is_err());
+
+        // The clock is set back to when both were good. Neither comes back.
+        clock.store(1_000_010, Ordering::SeqCst);
+        assert!(policy.authorize_sign(&CTX, b"windowed").is_err());
+        assert!(policy.authorize_sign(&CTX, b"short-lived").is_err());
+
+        // Nor after a restart: the latest time is on disk.
+        let config = OrgConfig::load(&dir.join("rule.json"), dir.clone(), None).unwrap();
+        let mut restarted = OrgGovernancePolicy::new(b"committee", config).unwrap();
+        let wall = clock.clone();
+        restarted.wall = Box::new(move || wall.load(Ordering::SeqCst));
+        assert!(restarted.authorize_sign(&CTX, b"windowed").is_err());
+        assert!(restarted.authorize_sign(&CTX, b"short-lived").is_err());
+
+        // A time that cannot be written down is not decided at.
+        clock.store(1_000_200, Ordering::SeqCst);
+        approve(b"later", 2_000_000);
+        let file = dir.join("rule.json.used.clock");
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        match restarted.authorize_sign(&CTX, b"later") {
+            Err(PolicyError::Refused(reason)) => assert!(reason.contains("time"), "{reason}"),
+            other => panic!("authorized without a recorded time: {other:?}"),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

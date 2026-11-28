@@ -1,4 +1,4 @@
-# tiny_http 0.12.0, with two changes
+# tiny_http 0.12.0, with three changes
 
 This is the published `tiny_http` 0.12.0 crate (sources, manifest and license files; its
 benches, examples and tests are left out, and so are the dev-dependencies they used). The
@@ -14,6 +14,12 @@ accepted socket gets a 10 second read and write timeout. Upstream sets none, so 
 connects and sends nothing, or sends headers and no body, held a thread for as long as it
 liked. An idle keep-alive connection is now closed after 10 seconds; clients reconnect. Found
 by the automated review of 2026-11-27 (DECISIONS.md D-141).
+
+The third change is in the accept loop in `src/lib.rs`: the server holds at most 256 open
+connections, and at most 32 from one address that is not this machine. Upstream starts a
+thread for every connection it is offered. A connection over the limit is closed at once.
+Local addresses are not counted one by one because a TLS front on the same machine brings
+every caller in from loopback; the front has its own limits (`cairn-gateway/src/tls.rs`).
 
 `src/lib.rs` also gained one `#![allow(...)]` line for two warnings current compilers raise.
 

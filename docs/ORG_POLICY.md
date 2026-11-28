@@ -84,7 +84,13 @@ approvers, lists one key under two names, or uses a name with characters other t
   the removed approver's approvals stop counting at once. A rule file that is missing or
   not valid makes the party refuse everything until it is fixed.
 - **Delivery is yours.** cairn does not move approval files to the parties.
-- **Clocks.** Expiry uses each party's own clock.
+- **Clocks.** Expiry uses each party's own clock, and a party never decides at an earlier
+  time than it already has: the latest time is kept in `<use record>.clock`, so setting the
+  clock back, with or without a restart, revives no expired approval and reopens no use
+  window. If that file cannot be written the party refuses. The other side of this: a clock
+  set far forward by mistake stays in force after it is corrected, and every approval that
+  expires before that time is refused. To recover, stop the party, delete the `.clock` file
+  and start it with the clock right; anyone who can do that can also set the time back.
 - **Both engines.** Tower signers and root engines take `--policy org` too, and a test runs
   the rule on all twenty tower processes. When too few tower nodes are left because their
   policies refused, the signer reports the refusal in the nodes' own words, and no node is

@@ -814,3 +814,23 @@ because changing its classes until it passes would hide a real observation; the 
 checklist says what a failure there means. `CAIRN_TIMING_SWAP=1` builds the two shares in the
 other order to tell data from memory layout. Lesson recorded: a timing measurement taken
 on a busy machine can pass for the wrong reason.
+
+**D-144. Remaining review findings closed where they could be; timing reach measured.**
+From BLOCKERS item 18. (d) The trusted dealer erases the whole key and each part, key
+generation erases its seeds and any secret not handed on as a share, secret derivation erases
+its expanded seed, and the sampler erases its two dropped Gaussians and its norm. No test:
+erasure is not observable from one. (e) The organization policy decides at
+max(clock, latest time decided at) and keeps that time in `<use record>.clock`, written
+before it is used; a write that fails refuses. A clock set forward by mistake therefore
+sticks until the file is deleted with the party stopped, which is the accepted cost.
+(f) Key generation and secret derivation set data-independent timing, and a party prints at
+startup whether it is on. Connections: 256 at once and 32 per address on the HTTPS front, 256
+on the HTTP server behind it (third change to the vendored `tiny_http`). The front now has
+tests for a client that goes silent after the handshake and for the per-address limit.
+Not changed, by design: (a) a coordinator can have a far-future height signed and so can
+record one; (b) one party's refusal ends a request. Measurements (docs/SAMPLER.md): the
+all-zero-share timing effect reaches a share with one non-zero coefficient per polynomial,
+with the opposite sign, and no further; the sampler's steps show no operand-dependent mean
+or spread one at a time; the whole sampler on all-identical uniforms is about 0.1% faster in
+three runs of four. Both effects are confined to inputs that do not occur, and neither is
+explained.

@@ -97,6 +97,30 @@ gives the party's share. So the sampler must not take input-dependent paths.
   about 5% of the round. Limits: one processor; one committee size (2-of-3); a
   statistical test finds differences, it does not prove there are none; and on x86-64 the
   equivalent setting (DOITM) belongs to the operating system, so cairn cannot turn it on there.
+- **How far it reaches (2026-11-28).** `tests/timing_locate.rs` now also times shares between
+  the extremes, each against a full random share, 200,000 times. One non-zero coefficient
+  per polynomial: 0.05% *faster*, t of -6.5 and -11.8 in two runs, so the effect is real and
+  has the opposite sign to the all-zero case. Four, 16, 64 or 128 non-zero coefficients: t of
+  -2.6, 1.0, 0.0, 1.8. One polynomial of the five all zero: t of 0.4 and -5.1, not settled.
+  A sum of 2, 5 or 10 shares, which is what a party holding several subsets' secrets
+  multiplies: t of -1.0, -1.7, 1.5. A share from honest key generation has coefficients
+  uniform in -4..4, about 228 of 256 non-zero; one with four or fewer does not occur. So
+  the difference is confined to inputs key generation does not produce. The cause is still
+  unknown: the reduction is a multiply and shift with no divide.
+- **The sampler's steps, beyond the average (2026-11-28).** A reviewer's point was that a
+  divide or square root with operand-dependent time could change the spread of the mask
+  round's time and leave its mean alone. `src/sampler_timing.rs` times each step alone, in
+  batches of 256, on the operands a hardware divider or square root finds easy (powers of
+  two, exact squares, zero, the ends of the range, quarter turns) against random ones, and
+  compares both the mean and the spread (a t-test on squared distance from the common
+  mean). Logarithm, square root, divide, cosine and sine, multiply: largest t 2.4 for the
+  mean and 1.5 for the spread, the same as random against random. So the claim is not
+  borne out for the steps one at a time. The whole sampler, given 1409 pairs that are all
+  the same easy value, is about 0.1% faster than on random uniforms in three runs of four
+  (t of -4.3, -3.4, -0.7, -4.0; spread t of -4.4, -3.8, -0.2, -4.7), against t below 1 for
+  random against random. No single step accounts for it and such an input does not occur
+  with real randomness, but it is a second case, after the all-zero share, where this
+  processor's time follows the data with data-independent timing on. Apple M3 only.
 - **Corrected the same day: a smaller difference remains, for an all-zero share only.**
   Run again on a quiet machine before the 0.7.2 tag, the same test fails about one time in
   four: the zero share is 1 to 2 of 770 microseconds *slower*, t between 1.6 and 5.2 over

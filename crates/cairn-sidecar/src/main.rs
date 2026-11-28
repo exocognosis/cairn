@@ -715,6 +715,7 @@ fn run(args: &[String]) -> Result<(), String> {
                         .await
                         .map_err(|e| format!("bind {bind}: {e}"))?;
                     eprintln!("cairn node {id}: committee party on {bind}");
+                    eprintln!("cairn node {id}: {}", threshold_mldsa::ct::report().1);
                     let policy = node_policy(args, &id.to_string(), &key.pk, "checkpoint")?;
                     let mut node = cairn_net::PartyNode::new(
                         id,
@@ -1490,6 +1491,7 @@ fn run(args: &[String]) -> Result<(), String> {
             runtime.block_on(async {
                 let listener = tokio::net::TcpListener::bind(&bind).await.map_err(|e| format!("bind {bind}: {e}"))?;
                 eprintln!("cairn dkg-party {id}: waiting for key generation on {bind}");
+                eprintln!("cairn dkg-party {id}: {}", threshold_mldsa::ct::report().1);
                 tokio::select! {
                     _ = cairn_net::transport::serve(listener, node.clone(), Duration::ZERO, identity_tls) => {}
                     _ = node.finished() => {

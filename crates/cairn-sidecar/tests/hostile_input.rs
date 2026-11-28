@@ -197,6 +197,40 @@ fn a_request_that_never_sends_its_body_does_not_stop_the_endpoint() {
     assert!(closed.is_ok(), "the endpoint kept a silent connection open");
 }
 
+#[test]
+fn idle_connections_cannot_use_up_the_endpoint_for_good() {
+    let roster = cairn_core::Roster::uniform(2, (1..=3).map(|i| format!("party-{i}")));
+    let endpoint =
+        cairn_sidecar::kms::serve("127.0.0.1:0", cairn_core::LocalFlat::deal(&roster).unwrap())
+            .unwrap();
+    let addr = endpoint.url().trim_start_matches("http://").to_owned();
+    let ask = || -> String {
+        let mut stream = std::net::TcpStream::connect(&addr).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let _ = stream.write_all(
+            b"POST / HTTP/1.1\r\nHost: kms\r\nX-Amz-Target: TrentService.GetPublicKey\r\n\
+        Content-Type: application/x-amz-json-1.1\r\nContent-Length: 22\r\nConnection: close\r\n\r\n\
+        {\"KeyId\":\"alias/cairn\"}",
+        );
+        let mut reply = Vec::new();
+        let _ = stream.read_to_end(&mut reply);
+        String::from_utf8_lossy(&reply).into_owned()
+    };
+    // The server holds at most 256 connections. With that many idle, the next is turned away
+    // at once instead of being given a thread.
+    let held: Vec<_> = (0..256)
+        .map(|_| std::net::TcpStream::connect(&addr).unwrap())
+        .collect();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(!ask().starts_with("HTTP/1.1 200"), "served over the limit");
+    // When they end, the endpoint serves again.
+    drop(held);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(ask().starts_with("HTTP/1.1 200"));
+}
+
 /// Valid inputs for the coverage-guided fuzzer to start from (`scripts/fuzz.sh`).
 #[test]
 #[ignore = "writes fuzz seeds; run by scripts/fuzz.sh"]

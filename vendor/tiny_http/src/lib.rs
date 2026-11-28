@@ -109,6 +109,49 @@ use std::thread;
 use std::time::Duration;
 
 use client::ClientConnection;
+
+// cairn: see CAIRN_PATCH.md. Open connections by client address (`None` for a Unix socket).
+type CairnOpen = Arc<std::sync::Mutex<std::collections::HashMap<Option<std::net::IpAddr>, usize>>>;
+
+/// One open connection's place in the count; gives it back when dropped.
+struct CairnSlot {
+    open: CairnOpen,
+    who: Option<std::net::IpAddr>,
+}
+
+impl Drop for CairnSlot {
+    fn drop(&mut self) {
+        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = open.get_mut(&self.who) {
+            *count -= 1;
+            if *count == 0 {
+                open.remove(&self.who);
+            }
+        }
+    }
+}
+
+/// A place for a new connection from `peer`, unless the server already has
+/// `CAIRN_MAX_CONNECTIONS` open or that client has `CAIRN_MAX_PER_CLIENT`. Local clients are
+/// not counted one by one: a TLS front on this machine brings every caller in from loopback.
+fn cairn_slot(open: &CairnOpen, peer: Option<std::net::SocketAddr>) -> Option<CairnSlot> {
+    let who = peer.map(|addr| addr.ip());
+    let mut counts = open.lock().unwrap_or_else(|e| e.into_inner());
+    let local = who.map_or(true, |ip| ip.is_loopback());
+    if counts.values().sum::<usize>() >= CAIRN_MAX_CONNECTIONS
+        || (!local && counts.get(&who).copied().unwrap_or(0) >= CAIRN_MAX_PER_CLIENT)
+    {
+        return None;
+    }
+    *counts.entry(who).or_insert(0) += 1;
+    Some(CairnSlot {
+        open: open.clone(),
+        who,
+    })
+}
+
+pub const CAIRN_MAX_CONNECTIONS: usize = 256;
+pub const CAIRN_MAX_PER_CLIENT: usize = 32;
 use connection::Connection;
 use util::MessagesQueue;
 
@@ -288,15 +331,19 @@ impl Server {
         let inside_close_trigger = close_trigger.clone();
         let inside_messages = messages.clone();
         thread::spawn(move || {
+            let open: CairnOpen = Arc::default();
             // a tasks pool is used to dispatch the connections into threads
             let tasks_pool = util::TaskPool::new();
 
             log::debug!("Running accept thread");
             while !inside_close_trigger.load(Relaxed) {
                 let new_client = match server.accept() {
-                    Ok((sock, _)) => {
+                    Ok((sock, peer)) => {
                         use util::RefinedTcpStream;
                         // cairn: see CAIRN_PATCH.md.
+                        let Some(slot) = cairn_slot(&open, peer) else {
+                            continue;
+                        };
                         sock.set_timeouts(std::time::Duration::from_secs(10));
                         let (read_closable, write_closable) = match ssl {
                             None => RefinedTcpStream::new(sock),
@@ -315,16 +362,19 @@ impl Server {
                             Some(ref _ssl) => unreachable!(),
                         };
 
-                        Ok(ClientConnection::new(write_closable, read_closable))
+                        Ok((ClientConnection::new(write_closable, read_closable), slot))
                     }
                     Err(e) => Err(e),
                 };
 
                 match new_client {
-                    Ok(client) => {
+                    Ok((client, slot)) => {
                         let messages = inside_messages.clone();
                         let mut client = Some(client);
+                        let mut slot = Some(slot);
                         tasks_pool.spawn(Box::new(move || {
+                            // Held until the connection's thread is done with it.
+                            let _slot = slot.take();
                             if let Some(client) = client.take() {
                                 // Synchronization is needed for HTTPS requests to avoid a deadlock
                                 if client.secure() {
